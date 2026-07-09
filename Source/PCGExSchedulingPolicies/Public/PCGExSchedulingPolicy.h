@@ -24,7 +24,7 @@ class UPCGExSchedulingConstraint;
  *
  * An empty constraint stack passes all gates with priority 0 — a valid, channel-only layering policy.
  */
-UCLASS(BlueprintType, ClassGroup = (Procedural), DisplayName = "PCGEx Scheduling Policy")
+UCLASS(BlueprintType, Blueprintable, ClassGroup = (Procedural), DisplayName = "PCGEx Scheduling Policy")
 class PCGEXSCHEDULINGPOLICIES_API UPCGExSchedulingPolicy : public UPCGSchedulingPolicyBase
 {
 	GENERATED_BODY()
@@ -67,7 +67,7 @@ public:
 	EPCGExConstraintLogic CombineMode = EPCGExConstraintLogic::All;
 
 	/** Composable constraint stack. Gates combine per CombineMode; priorities blend as a weighted normalized sum. */
-	UPROPERTY(BlueprintReadOnly, EditAnywhere, Instanced, Category = "RuntimeGeneration|Scheduling Policy Parameters", meta = (EditCondition = "bShouldDisplayProperties", EditConditionHides))
+	UPROPERTY(BlueprintReadOnly, EditAnywhere, Instanced, Category = "RuntimeGeneration|Scheduling Policy Parameters", meta = (EditCondition = "bShouldDisplayProperties", EditConditionHides, HideEditConditionToggle))
 	TArray<TObjectPtr<UPCGExSchedulingConstraint>> Constraints;
 
 	/** Sets the listened channels and invalidates the cached channel mask. */

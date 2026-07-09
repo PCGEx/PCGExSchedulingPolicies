@@ -89,3 +89,47 @@ public:
 	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const override;
 	virtual TOptional<double> CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid) const override;
 };
+
+/** Cells generate while they intersect a box around the generation source, optionally yaw-aligned to its facing direction. */
+UCLASS(BlueprintType, DisplayName = "Shape : Box")
+class PCGEXSCHEDULINGPOLICIES_API UPCGExSchedulingConstraintBox : public UPCGExSchedulingConstraintShape
+{
+	GENERATED_BODY()
+
+public:
+	/** Box half-extents around the generation source (X = forward when aligned to the source direction). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = 1.0, Units = "cm"))
+	FVector Extents = FVector(25600.0, 25600.0, 12800.0);
+
+	/** Yaw-align the box to the source's facing direction (horizontal only). Falls back to world-aligned when the source has no usable direction. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings)
+	bool bAlignToSourceDirection = false;
+
+	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const override;
+	virtual TOptional<double> CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid) const override;
+	virtual bool CullsBasedOnDirection() const override { return bAlignToSourceDirection; }
+};
+
+/**
+ * Cells generate while they intersect a cone from the generation source along its facing direction.
+ * The test is conservative-inclusive (cell bounding sphere vs cone) — cells straddling the cone
+ * surface are treated as inside. Sources without a usable direction fall back to a sphere of Range.
+ */
+UCLASS(BlueprintType, DisplayName = "Shape : Cone")
+class PCGEXSCHEDULINGPOLICIES_API UPCGExSchedulingConstraintCone : public UPCGExSchedulingConstraintShape
+{
+	GENERATED_BODY()
+
+public:
+	/** Cone length from the generation source along its facing direction. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = 1.0, Units = "cm"))
+	double Range = 25600.0;
+
+	/** Cone half angle, in degrees. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = 1.0, ClampMax = 89.0, Units = "deg"))
+	double HalfAngleDegrees = 45.0;
+
+	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const override;
+	virtual TOptional<double> CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid) const override;
+	virtual bool CullsBasedOnDirection() const override { return true; }
+};

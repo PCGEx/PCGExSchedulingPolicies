@@ -17,7 +17,7 @@ class IPCGGenSourceBase;
  * scheduler's cleanup ParallelFor (worker threads). Implementations must only read their
  * own properties, the generation source getters, and immutable subsystem snapshots.
  */
-UCLASS(Abstract, BlueprintType, EditInlineNew, DefaultToInstanced, CollapseCategories, ClassGroup = (Procedural))
+UCLASS(Abstract, BlueprintType, Blueprintable, EditInlineNew, DefaultToInstanced, CollapseCategories, ClassGroup = (Procedural))
 class PCGEXSCHEDULINGPOLICIES_API UPCGExSchedulingConstraint : public UObject
 {
 	GENERATED_BODY()

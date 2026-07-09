@@ -9,11 +9,69 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "UObject/ObjectKey.h"
 
+#include "UObject/SoftObjectPath.h"
+
 #include "PCGExSchedulingCommon.h"
 
 #include "PCGExSchedulingSubsystem.generated.h"
 
+class AActor;
+class AVolume;
 class IPCGGenSourceBase;
+
+/** Which geometry a target query extracts from its actors. */
+enum class EPCGExTargetGeometry : uint8
+{
+	Bounds = 0,
+	Volume,
+	Spline
+};
+
+/** Immutable description of a target set — what to resolve and how to track it. */
+struct FPCGExTargetQuery
+{
+	/** Explicit actor references (resolved when loaded — never force-loads). */
+	TArray<FSoftObjectPath> TargetActors;
+
+	/** Optional world tag query. */
+	FName TargetTag = NAME_None;
+
+	/** Seconds between tag scans. */
+	float TagQueryInterval = 2.0f;
+
+	/** Geometry extracted from each resolved actor. */
+	EPCGExTargetGeometry Geometry = EPCGExTargetGeometry::Bounds;
+
+	/** Max deviation (cm) when flattening splines to polylines. */
+	float SplineErrorTolerance = 50.0f;
+
+	/** Rebuild + rescan consumers when a target moves. */
+	bool bTrackMovement = true;
+
+	/** Movement detection tolerance (cm). */
+	float MovementTolerance = 50.0f;
+};
+
+/** One resolved target region — pure math except the weak volume pointer (game-thread deref only). */
+struct FPCGExTargetShape
+{
+	/** World-space bounds (points bounds for splines). */
+	FBox Bounds = FBox(EForceInit::ForceInit);
+
+	/** Set for Volume geometry — game-thread precise tests only. */
+	TWeakObjectPtr<const AVolume> Volume;
+
+	/** World-space polyline, Spline geometry only. */
+	TArray<FVector> SplinePoints;
+
+	bool bClosedSpline = false;
+};
+
+/** Immutable snapshot of a resolved target set. Shared to worker threads by pointer. */
+struct FPCGExTargetSnapshot
+{
+	TArray<FPCGExTargetShape> Shapes;
+};
 
 /**
  * World subsystem backing PCGEx scheduling policies: resolves and caches
@@ -55,6 +113,19 @@ public:
 	/** Drops the cached entry for a source so the next resolution recomputes it (e.g. channels edited on a component). */
 	void InvalidateSource(const UObject* InSourceObject);
 
+	/**
+	 * Returns the target snapshot for the given key (typically the querying constraint), building it
+	 * on first use via the lazily-invoked query provider. Registers the consumer's owning execution
+	 * source for movement-driven rescans. Game thread only.
+	 */
+	TSharedPtr<const FPCGExTargetSnapshot> ResolveTargetSnapshot(const UObject* InKey, TFunctionRef<FPCGExTargetQuery()> InQueryProvider, const UObject* InConsumer);
+
+	/** Last built snapshot for the given key, if any. Safe from any thread; never resolves. */
+	TSharedPtr<const FPCGExTargetSnapshot> GetCachedTargetSnapshot(const UObject* InKey) const;
+
+	/** Drops the cached target snapshot for a key so the next resolution rebuilds it (e.g. constraint edited). */
+	void InvalidateTargetCache(const UObject* InKey);
+
 protected:
 	/** Uncached resolution ladder. Game thread only. */
 	PCGExScheduling::FChannelMask ResolveMaskInternal(const IPCGGenSourceBase* InGenSource) const;
@@ -65,8 +136,43 @@ protected:
 		uint32 Revision = 0;
 	};
 
+	struct FTargetCacheEntry
+	{
+		FPCGExTargetQuery Query;
+		TSharedPtr<const FPCGExTargetSnapshot> Snapshot;
+
+		/** Resolved actor → transform at snapshot time, for movement detection. */
+		TMap<FObjectKey, FTransform> TrackedTransforms;
+
+		/** Actors found by the last tag scan. */
+		TArray<TWeakObjectPtr<const AActor>> TagActors;
+
+		/** Execution sources to rescan when the target set changes. */
+		TSet<FObjectKey> Consumers;
+
+		double LastTagScanTime = 0.0;
+	};
+
+	void TickSourceMaskMaintenance(double InNow);
+	void TickTargetCacheMaintenance(double InNow);
+
+	/** Scans the world for actors carrying the query tag. Game thread only. */
+	TArray<TWeakObjectPtr<const AActor>> ScanTagActors(FName InTag) const;
+
+	/** Builds a snapshot from the query + tag actors; fills the tracked transforms. Game thread only. */
+	TSharedPtr<const FPCGExTargetSnapshot> BuildTargetSnapshot(const FPCGExTargetQuery& InQuery, const TArray<TWeakObjectPtr<const AActor>>& InTagActors, TMap<FObjectKey, FTransform>& OutTrackedTransforms) const;
+
+	/** True when any tracked actor died or moved past the query tolerances. Game thread only. */
+	bool HaveTargetsMoved(const FPCGExTargetQuery& InQuery, const TMap<FObjectKey, FTransform>& InTrackedTransforms) const;
+
+	/** Forces a runtime-gen rescan of every consumer. Game thread only. */
+	void RefreshTargetConsumers(const TSet<FObjectKey>& InConsumers) const;
+
 	mutable FRWLock SourceMasksLock;
 	TMap<FObjectKey, FResolvedSource> SourceMasks;
+
+	mutable FRWLock TargetCachesLock;
+	TMap<FObjectKey, FTargetCacheEntry> TargetCaches;
 
 	/** Last periodic maintenance timestamp (re-resolution + dead key cleanup). */
 	double LastMaintenanceTime = 0.0;
