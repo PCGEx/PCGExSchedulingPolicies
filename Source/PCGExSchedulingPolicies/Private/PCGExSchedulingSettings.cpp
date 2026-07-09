@@ -78,7 +78,7 @@ void UPCGExSchedulingSettings::RebuildLookups()
 	TagToMask.Reset();
 
 	int32 Bit = 0;
-	int32 NumIgnored = 0;
+	TArray<FString> IgnoredChannels;
 
 	for (const FPCGExSchedulingChannel& Channel : Channels)
 	{
@@ -89,13 +89,13 @@ void UPCGExSchedulingSettings::RebuildLookups()
 
 		if (NameToMask.Contains(Channel.Name))
 		{
-			UE_LOG(LogPCGExScheduling, Warning, TEXT("Duplicate scheduling channel '%s' ignored."), *Channel.Name.ToString());
+			UE_LOG(LogPCGExScheduling, Warning, TEXT("Duplicate scheduling channel '%s' ignored — only the first entry owns the channel."), *Channel.Name.ToString());
 			continue;
 		}
 
 		if (Bit >= PCGExScheduling::MaxChannels)
 		{
-			++NumIgnored;
+			IgnoredChannels.Add(Channel.Name.ToString());
 			continue;
 		}
 
@@ -111,9 +111,10 @@ void UPCGExSchedulingSettings::RebuildLookups()
 		}
 	}
 
-	if (NumIgnored > 0)
+	if (!IgnoredChannels.IsEmpty())
 	{
-		UE_LOG(LogPCGExScheduling, Warning, TEXT("%d scheduling channel(s) ignored — only %d channels are supported."), NumIgnored, PCGExScheduling::MaxChannels);
+		UE_LOG(LogPCGExScheduling, Warning, TEXT("%d scheduling channel(s) ignored — only %d channels are supported: %s"),
+			IgnoredChannels.Num(), PCGExScheduling::MaxChannels, *FString::Join(IgnoredChannels, TEXT(", ")));
 	}
 
 	++Revision;
