@@ -24,7 +24,6 @@ public:
 
 private:
 	TArray<FName> GetSelection() const;
-	void SetSelection(const TArray<FName>& InSelection) const;
 	void ToggleChannel(FName InChannel) const;
 	bool IsChannelSelected(FName InChannel) const;
 	FText GetSummaryText() const;

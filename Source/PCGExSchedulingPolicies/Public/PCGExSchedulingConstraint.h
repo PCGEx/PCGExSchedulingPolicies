@@ -11,7 +11,7 @@ class IPCGGenSourceBase;
 
 /**
  * A single composable scheduling constraint, stacked on a UPCGExSchedulingPolicy.
- * Extending the system means adding a constraint class — never a new policy.
+ * Extending the system means adding a constraint class -- never a new policy.
  *
  * Threading contract: EvaluateGate with bExpanded=true is invoked from the runtime-gen
  * scheduler's cleanup ParallelFor (worker threads). Implementations must only read their
@@ -37,7 +37,7 @@ public:
 
 	/**
 	 * Gate test for a grid cell against a generation source. Must honor bInvert.
-	 * bExpanded=true evaluates the enlarged cleanup variant (hysteresis) used by ShouldCull —
+	 * bExpanded=true evaluates the enlarged cleanup variant (hysteresis) used by ShouldCull --
 	 * runs on worker threads, see the class threading contract.
 	 */
 	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const { return true; }
@@ -49,7 +49,7 @@ public:
 	virtual bool CullsBasedOnDirection() const { return false; }
 
 	/**
-	 * Same-class, property-identical comparison (reflection walk) — subclass properties are
+	 * Same-class, property-identical comparison (reflection walk) -- subclass properties are
 	 * covered automatically. Override only for non-property state.
 	 */
 	virtual bool IsEquivalentTo(const UPCGExSchedulingConstraint* InOther) const;

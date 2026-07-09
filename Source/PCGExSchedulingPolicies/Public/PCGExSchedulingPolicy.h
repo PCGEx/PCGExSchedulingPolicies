@@ -19,10 +19,10 @@ class UPCGExSchedulingConstraint;
  *   Plugins → PCGEx | Scheduling Policies; sources carry channels explicitly via the PCGEx
  *   Generation Source component, or through actor tags mapped in the settings).
  * - A combinable stack of scheduling constraints (shapes, source signals, world targets)
- *   refining which grid cells generate, get cleaned up, and in what order — within the
+ *   refining which grid cells generate, get cleaned up, and in what order -- within the
  *   component's generation radii, which remain the engine-level broadphase.
  *
- * An empty constraint stack passes all gates with priority 0 — a valid, channel-only layering policy.
+ * An empty constraint stack passes all gates with priority 0 -- a valid, channel-only layering policy.
  */
 UCLASS(BlueprintType, Blueprintable, ClassGroup = (Procedural), DisplayName = "PCGEx Scheduling Policy")
 class PCGEXSCHEDULINGPOLICIES_API UPCGExSchedulingPolicy : public UPCGSchedulingPolicyBase
@@ -87,7 +87,7 @@ protected:
 private:
 	/**
 	 * Cached resolution of Channels. Written on the game thread (scan phase), read possibly
-	 * one tick stale by worker-thread cleanup — ordering is guaranteed by the scheduler
+	 * one tick stale by worker-thread cleanup -- ordering is guaranteed by the scheduler
 	 * running its cleanup ParallelFor after the game-thread scan within the same tick.
 	 */
 	mutable PCGExScheduling::FChannelMask CachedChannelMask = 0;

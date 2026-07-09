@@ -27,10 +27,10 @@ enum class EPCGExTargetGeometry : uint8
 	Spline
 };
 
-/** Immutable description of a target set — what to resolve and how to track it. */
+/** Immutable description of a target set -- what to resolve and how to track it. */
 struct FPCGExTargetQuery
 {
-	/** Explicit actor references (resolved when loaded — never force-loads). */
+	/** Explicit actor references (resolved when loaded -- never force-loads). */
 	TArray<FSoftObjectPath> TargetActors;
 
 	/** Optional world tag query. */
@@ -52,13 +52,13 @@ struct FPCGExTargetQuery
 	float MovementTolerance = 50.0f;
 };
 
-/** One resolved target region — pure math except the weak volume pointer (game-thread deref only). */
+/** One resolved target region -- pure math except the weak volume pointer (game-thread deref only). */
 struct FPCGExTargetShape
 {
 	/** World-space bounds (points bounds for splines). */
 	FBox Bounds = FBox(EForceInit::ForceInit);
 
-	/** Set for Volume geometry — game-thread precise tests only. */
+	/** Set for Volume geometry -- game-thread precise tests only. */
 	TWeakObjectPtr<const AVolume> Volume;
 
 	/** World-space polyline, Spline geometry only. */
@@ -84,26 +84,41 @@ struct FPCGExActiveSourcesSnapshot
 		FVector Position = FVector::ZeroVector;
 		PCGExScheduling::FChannelMask Mask = 0;
 		bool bIsEditorCamera = false;
+
+		bool operator==(const FSourceState& Other) const
+		{
+			return Position == Other.Position && Mask == Other.Mask && bIsEditorCamera == Other.bIsEditorCamera;
+		}
 	};
+
+	using FChannelTable = TArray<TPair<FName, PCGExScheduling::FChannelMask>>;
 
 	TArray<FSourceState> Sources;
 
-	/** Settings-ordered (name, single-bit mask) channel table, revision-consistent with the source masks. */
-	TArray<TPair<FName, PCGExScheduling::FChannelMask>> ChannelTable;
+	/** Settings-ordered (name, single-bit mask) channel table, shared across frames -- rebuilt only on settings revision changes. */
+	TSharedPtr<const FChannelTable> ChannelTable;
+
+	PCGExScheduling::FChannelMask ResolveName(const FName InName) const
+	{
+		if (ChannelTable)
+		{
+			for (const TPair<FName, PCGExScheduling::FChannelMask>& Entry : *ChannelTable)
+			{
+				if (Entry.Key == InName)
+				{
+					return Entry.Value;
+				}
+			}
+		}
+		return 0;
+	}
 
 	PCGExScheduling::FChannelMask ResolveNames(const TArray<FName>& InNames) const
 	{
 		PCGExScheduling::FChannelMask Mask = 0;
 		for (const FName& Name : InNames)
 		{
-			for (const TPair<FName, PCGExScheduling::FChannelMask>& Entry : ChannelTable)
-			{
-				if (Entry.Key == Name)
-				{
-					Mask |= Entry.Value;
-					break;
-				}
-			}
+			Mask |= ResolveName(Name);
 		}
 		return Mask;
 	}
@@ -165,8 +180,11 @@ public:
 	/** Latest per-frame snapshot of active generation sources. Safe from any thread. Null when the world has no PCG runtime activity. */
 	TSharedPtr<const FPCGExActiveSourcesSnapshot> GetActiveSourcesSnapshot() const;
 
+	/** Single home for editor-camera identity -- the policy bypass and the node snapshot must agree on it. */
+	static bool IsEditorCameraSource(const IPCGGenSourceBase* InGenSource);
+
 protected:
-	/** Rebuilt every tick (cheap — a handful of sources). Game thread. */
+	/** Refreshed every tick, republished only when contents change. Game thread. */
 	void RebuildActiveSourcesSnapshot();
 
 	/** Uncached resolution ladder. Game thread only. */
@@ -186,6 +204,9 @@ protected:
 		/** Resolved actor → transform at snapshot time, for movement detection. */
 		TMap<FObjectKey, FTransform> TrackedTransforms;
 
+		/** Explicit references that did not resolve at build time (unloaded) -- re-attempted during maintenance so streamed-in targets are picked up. */
+		TArray<FSoftObjectPath> UnresolvedTargets;
+
 		/** Actors found by the last tag scan. */
 		TArray<TWeakObjectPtr<const AActor>> TagActors;
 
@@ -195,17 +216,20 @@ protected:
 		double LastTagScanTime = 0.0;
 	};
 
-	void TickSourceMaskMaintenance(double InNow);
+	void TickSourceMaskMaintenance();
 	void TickTargetCacheMaintenance(double InNow);
 
 	/** Scans the world for actors carrying the query tag. Game thread only. */
 	TArray<TWeakObjectPtr<const AActor>> ScanTagActors(FName InTag) const;
 
-	/** Builds a snapshot from the query + tag actors; fills the tracked transforms. Game thread only. */
-	TSharedPtr<const FPCGExTargetSnapshot> BuildTargetSnapshot(const FPCGExTargetQuery& InQuery, const TArray<TWeakObjectPtr<const AActor>>& InTagActors, TMap<FObjectKey, FTransform>& OutTrackedTransforms) const;
+	/** Builds a snapshot from the query + tag actors; fills the tracked transforms and the unresolved reference list. Game thread only. */
+	TSharedPtr<const FPCGExTargetSnapshot> BuildTargetSnapshot(const FPCGExTargetQuery& InQuery, const TArray<TWeakObjectPtr<const AActor>>& InTagActors, TMap<FObjectKey, FTransform>& OutTrackedTransforms, TArray<FSoftObjectPath>& OutUnresolvedTargets) const;
 
-	/** True when any tracked actor died or moved past the query tolerances. Game thread only. */
-	bool HaveTargetsMoved(const FPCGExTargetQuery& InQuery, const TMap<FObjectKey, FTransform>& InTrackedTransforms) const;
+	/** True when any tracked actor died or moved past the tolerance. Game thread only. */
+	bool HaveTargetsMoved(const TMap<FObjectKey, FTransform>& InTrackedTransforms, double InMovementTolerance) const;
+
+	/** True when any previously-unresolved explicit reference now resolves (target streamed in). Game thread only. */
+	bool HaveTargetsResolved(const TArray<FSoftObjectPath>& InUnresolvedTargets) const;
 
 	/** Forces a runtime-gen rescan of every consumer. Game thread only. */
 	void RefreshTargetConsumers(const TSet<FObjectKey>& InConsumers) const;
@@ -218,6 +242,10 @@ protected:
 
 	mutable FRWLock ActiveSourcesLock;
 	TSharedPtr<const FPCGExActiveSourcesSnapshot> ActiveSourcesSnapshot;
+
+	/** Settings channel table shared into snapshots -- rebuilt only when the settings revision changes. Game thread. */
+	TSharedPtr<const FPCGExActiveSourcesSnapshot::FChannelTable> CachedChannelTable;
+	uint32 CachedChannelTableRevision = 0;
 
 	/** Last periodic maintenance timestamp (re-resolution + dead key cleanup). */
 	double LastMaintenanceTime = 0.0;

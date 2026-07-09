@@ -19,7 +19,7 @@ namespace PCGExSchedulingShapes
 		return OutPosition;
 	}
 
-	/** Squared distance from the FARTHEST point of a box to a point (Z ignored on 2D grids) — 'cell fully inside sphere' tests. */
+	/** Squared distance from the FARTHEST point of a box to a point (Z ignored on 2D grids) -- 'cell fully inside sphere' tests. */
 	inline double MaxSquaredDistanceToPoint(const FBox& InBounds, const FVector& InPoint, const bool bUse2DGrid)
 	{
 		const double DX = FMath::Max(FMath::Abs(InBounds.Min.X - InPoint.X), FMath::Abs(InBounds.Max.X - InPoint.X));
@@ -27,6 +27,9 @@ namespace PCGExSchedulingShapes
 		const double DZ = bUse2DGrid ? 0.0 : FMath::Max(FMath::Abs(InBounds.Min.Z - InPoint.Z), FMath::Abs(InBounds.Max.Z - InPoint.Z));
 		return DX * DX + DY * DY + DZ * DZ;
 	}
+
+	/** Null-safe source position fetch. */
+	PCGEXSCHEDULINGPOLICIES_API TOptional<FVector> GetSourcePosition(const IPCGGenSourceBase* InGenSource);
 }
 
 /**
@@ -43,7 +46,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = 1.0))
 	double CleanupScale = 1.1;
 
-	/** Only the shell of the shape gates generation — cells fully inside the hollow interior are excluded. Affects gating only, not priority. */
+	/** Only the shell of the shape gates generation -- cells fully inside the hollow interior are excluded. Affects gating only, not priority. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings)
 	bool bHollow = false;
 
@@ -67,7 +70,8 @@ protected:
 	/**
 	 * Mirrored factor for the hollow interior boundary: the cleanup shell must widen on BOTH
 	 * bounds (outer×Scale grows out, inner×(2-Scale) grows in) so neither shell edge flickers.
-	 * Inverted constraints (Scale < 1) shrink both bounds symmetrically for the same reason.
+	 * Inverted constraints (Scale < 1) mirror it -- the outer bound shrinks while the inner
+	 * bound grows, narrowing the shell from both sides.
 	 */
 	double GetInnerGateScale(const bool bExpanded) const
 	{
@@ -90,7 +94,7 @@ class PCGEXSCHEDULINGPOLICIES_API UPCGExSchedulingConstraintSphere : public UPCG
 	GENERATED_BODY()
 
 public:
-	/** Sphere radius around the generation source. Note: the component's generation radii remain the engine-level broadphase — cells beyond them never generate. */
+	/** Sphere radius around the generation source. Note: the component's generation radii remain the engine-level broadphase -- cells beyond them never generate. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = 1.0, Units = "cm"))
 	double Radius = 25600.0;
 
@@ -98,7 +102,7 @@ public:
 	virtual TOptional<double> CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid) const override;
 };
 
-/** Cells generate while they intersect a world-Z-aligned cylinder around the generation source — vertical reach is decoupled from horizontal reach. */
+/** Cells generate while they intersect a world-Z-aligned cylinder around the generation source -- vertical reach is decoupled from horizontal reach. */
 UCLASS(BlueprintType, DisplayName = "Shape : Cylinder")
 class PCGEXSCHEDULINGPOLICIES_API UPCGExSchedulingConstraintCylinder : public UPCGExSchedulingConstraintShape
 {
@@ -139,7 +143,7 @@ public:
 
 /**
  * Cells generate while they intersect a cone from the generation source along its facing direction.
- * The test is conservative-inclusive (cell bounding sphere vs cone) — cells straddling the cone
+ * The test is conservative-inclusive (cell bounding sphere vs cone) -- cells straddling the cone
  * surface are treated as inside. Sources without a usable direction fall back to a sphere of Range.
  */
 UCLASS(BlueprintType, DisplayName = "Shape : Cone")
@@ -159,4 +163,38 @@ public:
 	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const override;
 	virtual TOptional<double> CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid) const override;
 	virtual bool CullsBasedOnDirection() const override { return true; }
+
+protected:
+	/**
+	 * Value-keyed trig cache: recomputed when the angle changes, cached from the game thread
+	 * only. Worker-thread cleanup either reads the cache or recomputes locally -- the
+	 * scheduler's scan-then-cleanup barrier orders the game-thread write before worker reads.
+	 */
+	void GetHalfAngleTrig(double& OutCosHalfAngle, double& OutSinHalfAngle) const
+	{
+		const double ClampedAngle = FMath::Clamp(HalfAngleDegrees, 1.0, 89.0);
+
+		if (CachedTrigAngle == ClampedAngle)
+		{
+			OutCosHalfAngle = CachedCosHalfAngle;
+			OutSinHalfAngle = CachedSinHalfAngle;
+			return;
+		}
+
+		const double HalfAngleRadians = FMath::DegreesToRadians(ClampedAngle);
+		OutCosHalfAngle = FMath::Cos(HalfAngleRadians);
+		OutSinHalfAngle = FMath::Sin(HalfAngleRadians);
+
+		if (IsInGameThread())
+		{
+			CachedCosHalfAngle = OutCosHalfAngle;
+			CachedSinHalfAngle = OutSinHalfAngle;
+			CachedTrigAngle = ClampedAngle;
+		}
+	}
+
+private:
+	mutable double CachedTrigAngle = TNumericLimits<double>::Max();
+	mutable double CachedCosHalfAngle = 0.0;
+	mutable double CachedSinHalfAngle = 1.0;
 };

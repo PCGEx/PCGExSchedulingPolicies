@@ -137,7 +137,7 @@ bool UPCGExGenSourceComponent::IsEquivalent(IPCGGenSourceBase* InOther, const FP
 	}
 
 	// Sources broadcasting on different channel sets must never be collapsed by the
-	// scheduler's scan dedup — a collapsed source is never presented to any policy.
+	// scheduler's scan dedup -- a collapsed source is never presented to any policy.
 	// Dedup runs on the game thread (FPCGGenSourceManager::GetUniqueGenSources).
 	if (UPCGExSchedulingSubsystem* Subsystem = UPCGExSchedulingSubsystem::GetInstance(GetWorld()))
 	{

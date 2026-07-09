@@ -11,11 +11,23 @@ PCGEXSCHEDULINGPOLICIES_API DECLARE_LOG_CATEGORY_EXTERN(LogPCGExScheduling, Log,
 
 namespace PCGExScheduling
 {
-	/** Hard cap on the number of scheduling channels — channel sets resolve to a 64-bit mask. */
+	/** Hard cap on the number of scheduling channels -- channel sets resolve to a 64-bit mask. */
 	inline constexpr int32 MaxChannels = 64;
 
 	/** Runtime representation of a set of channels. Bit indices map to entries in UPCGExSchedulingSettings::Channels. */
 	using FChannelMask = uint64;
+
+	/** Inclusive 1D interval overlap. */
+	FORCEINLINE bool IntervalsOverlap(const double MinA, const double MaxA, const double MinB, const double MaxB)
+	{
+		return MinA <= MaxB && MinB <= MaxA;
+	}
+
+	/** Comma-joined channel names for UI summaries (node subtitles, picker labels). */
+	inline FString JoinChannelNames(const TArray<FName>& InNames)
+	{
+		return FString::JoinBy(InNames, TEXT(", "), [](const FName& Name) { return Name.ToString(); });
+	}
 }
 
 /** How channel-filtered policies treat generation sources that resolve to no channels at all. */
@@ -49,7 +61,7 @@ struct PCGEXSCHEDULINGPOLICIES_API FPCGExChannelSelector
 
 	bool IsEmpty() const { return Channels.IsEmpty(); }
 
-	/** Exact (order-sensitive) comparison — conservative equality used by policy equivalence checks. */
+	/** Exact (order-sensitive) comparison -- conservative equality used by policy equivalence checks. */
 	bool operator==(const FPCGExChannelSelector& Other) const { return Channels == Other.Channels; }
 	bool operator!=(const FPCGExChannelSelector& Other) const { return !(*this == Other); }
 };

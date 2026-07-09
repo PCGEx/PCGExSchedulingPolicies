@@ -11,7 +11,7 @@
 
 /**
  * Priority-only constraint: cells aligned with the generation source's facing direction
- * are scheduled sooner (the stock policy's direction term). Never gates — combine with
+ * are scheduled sooner (the stock policy's direction term). Never gates -- combine with
  * shapes for spatial masking. Invert to favor cells behind the source.
  */
 UCLASS(BlueprintType, DisplayName = "Source : Direction Alignment")
@@ -23,7 +23,7 @@ public:
 	virtual TOptional<double> CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid) const override;
 
 	// Mirrors the stock policy: direction-based *priority* alone does not force
-	// rescans on rotation — only direction-based culling does (see View Frustum).
+	// rescans on rotation -- only direction-based culling does (see View Frustum).
 	virtual bool CullsBasedOnDirection() const override { return false; }
 };
 

@@ -3,17 +3,14 @@
 
 #include "Constraints/PCGExSchedulingConstraintTargets.h"
 
+#include "PCGExSchedulingCommon.h"
+
 #include "GameFramework/Volume.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(PCGExSchedulingConstraintTargets)
 
 namespace PCGExSchedulingConstraintTargets
 {
-	FORCEINLINE bool IntervalsOverlap(const double MinA, const double MaxA, const double MinB, const double MaxB)
-	{
-		return MinA <= MaxB && MinB <= MaxA;
-	}
-
 	/** Region bounds expanded by a flat amount, then scaled about their center (hysteresis). */
 	FBox ScaledRegion(const FBox& InRegion, const double InExpansion, const double InScale)
 	{
@@ -25,22 +22,26 @@ namespace PCGExSchedulingConstraintTargets
 
 	bool BoxOverlap(const FBox& InRegion, const FBox& InCell, const bool bUse2DGrid)
 	{
-		if (!IntervalsOverlap(InRegion.Min.X, InRegion.Max.X, InCell.Min.X, InCell.Max.X)
-			|| !IntervalsOverlap(InRegion.Min.Y, InRegion.Max.Y, InCell.Min.Y, InCell.Max.Y))
+		if (!PCGExScheduling::IntervalsOverlap(InRegion.Min.X, InRegion.Max.X, InCell.Min.X, InCell.Max.X)
+			|| !PCGExScheduling::IntervalsOverlap(InRegion.Min.Y, InRegion.Max.Y, InCell.Min.Y, InCell.Max.Y))
 		{
 			return false;
 		}
 
-		return bUse2DGrid || IntervalsOverlap(InRegion.Min.Z, InRegion.Max.Z, InCell.Min.Z, InCell.Max.Z);
+		return bUse2DGrid || PCGExScheduling::IntervalsOverlap(InRegion.Min.Z, InRegion.Max.Z, InCell.Min.Z, InCell.Max.Z);
 	}
 
 	double BoxToBoxDistance(const FBox& InRegion, const FBox& InCell, const bool bUse2DGrid)
 	{
+		if (!bUse2DGrid)
+		{
+			return FMath::Sqrt(InRegion.ComputeSquaredDistanceToBox(InCell));
+		}
+
 		const double GapX = FMath::Max3(0.0, InRegion.Min.X - InCell.Max.X, InCell.Min.X - InRegion.Max.X);
 		const double GapY = FMath::Max3(0.0, InRegion.Min.Y - InCell.Max.Y, InCell.Min.Y - InRegion.Max.Y);
-		const double GapZ = bUse2DGrid ? 0.0 : FMath::Max3(0.0, InRegion.Min.Z - InCell.Max.Z, InCell.Min.Z - InRegion.Max.Z);
 
-		return FMath::Sqrt(GapX * GapX + GapY * GapY + GapZ * GapZ);
+		return FMath::Sqrt(GapX * GapX + GapY * GapY);
 	}
 
 	/** Min distance from the cell center to the shape's polyline (2D-flattened when asked). */
@@ -126,7 +127,7 @@ namespace PCGExSchedulingConstraintTargets
 
 bool UPCGExSchedulingConstraintTargetsBase::EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid, const bool bExpanded) const
 {
-	// Purely world-region driven — the generation source only matters through the engine's radius broadphase.
+	// Purely world-region driven -- the generation source only matters through the engine's radius broadphase.
 	const TSharedPtr<const FPCGExTargetSnapshot> Snapshot = GetTargetSnapshot();
 
 	bool bInside = false;
@@ -180,6 +181,11 @@ TOptional<double> UPCGExSchedulingConstraintTargetsBase::CalcPriority(const IPCG
 	return FMath::Pow(Closeness, FalloffExponent);
 }
 
+double UPCGExSchedulingConstraintTargetsBase::DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const bool bUse2DGrid) const
+{
+	return PCGExSchedulingConstraintTargets::BoxToBoxDistance(InShape.Bounds.ExpandBy(GetBoundsExpansion()), InBounds, bUse2DGrid);
+}
+
 #if WITH_EDITOR
 void UPCGExSchedulingConstraintTargetsBase::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
@@ -189,6 +195,9 @@ void UPCGExSchedulingConstraintTargetsBase::PostEditChangeProperty(FPropertyChan
 	{
 		Subsystem->InvalidateTargetCache(this);
 	}
+
+	// The invalidation dropped the cache entry (consumer set included) -- re-register on next resolve.
+	bConsumerRegistered = false;
 }
 #endif
 
@@ -225,7 +234,17 @@ TSharedPtr<const FPCGExTargetSnapshot> UPCGExSchedulingConstraintTargetsBase::Ge
 
 	if (IsInGameThread())
 	{
-		return Subsystem->ResolveTargetSnapshot(this, [this] { return BuildTargetQuery(); }, this);
+		// Register as a consumer once per instance -- afterwards the per-cell resolve
+		// fast path skips the outer-chain walk and the consumer-set lookup entirely.
+		const UObject* Consumer = bConsumerRegistered ? nullptr : static_cast<const UObject*>(this);
+		TSharedPtr<const FPCGExTargetSnapshot> Snapshot = Subsystem->ResolveTargetSnapshot(this, [this] { return BuildTargetQuery(); }, Consumer);
+
+		if (Snapshot && Consumer)
+		{
+			bConsumerRegistered = true;
+		}
+
+		return Snapshot;
 	}
 
 	return Subsystem->GetCachedTargetSnapshot(this);
@@ -252,11 +271,6 @@ bool UPCGExSchedulingConstraintTargetBounds::TestShape(const FPCGExTargetShape& 
 	return PCGExSchedulingConstraintTargets::BoxOverlap(Region, InBounds, InContext.bUse2DGrid);
 }
 
-double UPCGExSchedulingConstraintTargetBounds::DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const bool bUse2DGrid) const
-{
-	return PCGExSchedulingConstraintTargets::BoxToBoxDistance(InShape.Bounds.ExpandBy(BoundsExpansion), InBounds, bUse2DGrid);
-}
-
 #pragma endregion
 
 #pragma region UPCGExSchedulingConstraintTargetVolume
@@ -269,9 +283,11 @@ bool UPCGExSchedulingConstraintTargetVolume::TestShape(const FPCGExTargetShape& 
 		return false;
 	}
 
-	// Precise brush test: generation path only (game thread, non-expanded, 3D) — cell
-	// center + circumradius, conservative-inclusive against the actual brush.
-	if (bPreciseVolumeTest && InContext.bGameThread && !InContext.bExpanded && !InContext.bUse2DGrid)
+	// Precise brush test: generation path only (game thread, non-expanded, 3D) -- cell
+	// center + circumradius, conservative-inclusive against the actual brush. Skipped when
+	// inverted: narrowing only the generate region while cleanup keeps the box would break
+	// the inverted keep⊇generate hysteresis invariant (generate↔cull flicker).
+	if (bPreciseVolumeTest && !bInvert && InContext.bGameThread && !InContext.bExpanded && !InContext.bUse2DGrid)
 	{
 		if (const AVolume* Volume = InShape.Volume.Get())
 		{
@@ -280,11 +296,6 @@ bool UPCGExSchedulingConstraintTargetVolume::TestShape(const FPCGExTargetShape& 
 	}
 
 	return true;
-}
-
-double UPCGExSchedulingConstraintTargetVolume::DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const bool bUse2DGrid) const
-{
-	return PCGExSchedulingConstraintTargets::BoxToBoxDistance(InShape.Bounds.ExpandBy(BoundsExpansion), InBounds, bUse2DGrid);
 }
 
 #pragma endregion
@@ -315,7 +326,7 @@ bool UPCGExSchedulingConstraintTargetSpline::TestShape(const FPCGExTargetShape& 
 		return true;
 	}
 
-	// Interior fill for closed splines. Membership deep inside is scale-independent —
+	// Interior fill for closed splines. Membership deep inside is scale-independent --
 	// the corridor (scaled) provides the hysteresis band at the polygon boundary.
 	return bFillClosedSplines && PCGExSchedulingConstraintTargets::InsideFilledSpline(InShape, InBounds.GetCenter(), Radius, InContext.bUse2DGrid);
 }

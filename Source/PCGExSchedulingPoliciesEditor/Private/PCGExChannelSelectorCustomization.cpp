@@ -73,7 +73,7 @@ TArray<FName> FPCGExChannelSelectorCustomization::GetSelection() const
 	return Selection;
 }
 
-void FPCGExChannelSelectorCustomization::SetSelection(const TArray<FName>& InSelection) const
+void FPCGExChannelSelectorCustomization::ToggleChannel(const FName InChannel) const
 {
 	if (!StructHandle.IsValid())
 	{
@@ -84,12 +84,18 @@ void FPCGExChannelSelectorCustomization::SetSelection(const TArray<FName>& InSel
 
 	StructHandle->NotifyPreChange();
 
+	// Toggle per object -- multi-selected objects each flip their own membership instead
+	// of being clobbered by the first object's selection.
 	StructHandle->EnumerateRawData(
-		[&InSelection](void* RawData, const int32, const int32)
+		[InChannel](void* RawData, const int32, const int32)
 		{
 			if (RawData)
 			{
-				static_cast<FPCGExChannelSelector*>(RawData)->Channels = InSelection;
+				TArray<FName>& ObjectChannels = static_cast<FPCGExChannelSelector*>(RawData)->Channels;
+				if (ObjectChannels.Remove(InChannel) == 0)
+				{
+					ObjectChannels.Add(InChannel);
+				}
 			}
 			return true;
 		});
@@ -98,44 +104,58 @@ void FPCGExChannelSelectorCustomization::SetSelection(const TArray<FName>& InSel
 	StructHandle->NotifyFinishedChangingProperties();
 }
 
-void FPCGExChannelSelectorCustomization::ToggleChannel(const FName InChannel) const
-{
-	TArray<FName> Selection = GetSelection();
-	if (Selection.Remove(InChannel) == 0)
-	{
-		Selection.Add(InChannel);
-	}
-
-	SetSelection(Selection);
-}
-
 bool FPCGExChannelSelectorCustomization::IsChannelSelected(const FName InChannel) const
 {
-	return GetSelection().Contains(InChannel);
+	// Display convention: checkmarks reflect the first selected object. Allocation-free --
+	// polled per menu item per frame while the menu is open.
+	bool bSelected = false;
+
+	if (StructHandle.IsValid())
+	{
+		StructHandle->EnumerateConstRawData(
+			[InChannel, &bSelected](const void* RawData, const int32, const int32)
+			{
+				if (RawData)
+				{
+					bSelected = static_cast<const FPCGExChannelSelector*>(RawData)->Channels.Contains(InChannel);
+					return false;
+				}
+				return true;
+			});
+	}
+
+	return bSelected;
 }
 
 FText FPCGExChannelSelectorCustomization::GetSummaryText() const
 {
-	const TArray<FName> Selection = GetSelection();
+	// Polled by Slate every paint -- read the first object in place, no array copy.
+	FText Summary = LOCTEXT("NoChannels", "None");
 
-	if (Selection.IsEmpty())
+	if (StructHandle.IsValid())
 	{
-		return LOCTEXT("NoChannels", "None");
+		StructHandle->EnumerateConstRawData(
+			[&Summary](const void* RawData, const int32, const int32)
+			{
+				if (RawData)
+				{
+					const FPCGExChannelSelector* Selector = static_cast<const FPCGExChannelSelector*>(RawData);
+					if (!Selector->Channels.IsEmpty())
+					{
+						Summary = FText::FromString(PCGExScheduling::JoinChannelNames(Selector->Channels));
+					}
+					return false;
+				}
+				return true;
+			});
 	}
 
-	FString Summary;
-	for (const FName& Channel : Selection)
-	{
-		if (!Summary.IsEmpty()) { Summary += TEXT(", "); }
-		Summary += Channel.ToString();
-	}
-
-	return FText::FromString(Summary);
+	return Summary;
 }
 
 TSharedRef<SWidget> FPCGExChannelSelectorCustomization::BuildChannelsMenu() const
 {
-	// Keep the menu open across toggles — channel selection is a multi-pick.
+	// Keep the menu open across toggles -- channel selection is a multi-pick.
 	FMenuBuilder MenuBuilder(/*bInShouldCloseWindowAfterMenuSelection=*/false, /*InCommandList=*/nullptr);
 
 	const UPCGExSchedulingSettings* Settings = GetDefault<UPCGExSchedulingSettings>();
@@ -176,7 +196,7 @@ TSharedRef<SWidget> FPCGExChannelSelectorCustomization::BuildChannelsMenu() cons
 
 	MenuBuilder.EndSection();
 
-	// Selected names that no longer exist in the settings — flag and allow removal.
+	// Selected names that no longer exist in the settings -- flag and allow removal.
 	TArray<FName> UnknownChannels;
 	for (const FName& Channel : GetSelection())
 	{

@@ -7,6 +7,7 @@
 #include "Components/ActorComponent.h"
 #include "RuntimeGen/GenSources/PCGGenSourceBase.h"
 
+#include "PCGExChannelProvider.h"
 #include "PCGExSchedulingCommon.h"
 
 #include "PCGExGenSourceComponent.generated.h"
@@ -20,11 +21,11 @@ class FPCGGenSourceManager;
  * PCGEx scheduling policies only react to sources whose channels overlap their own.
  *
  * Implements IPCGGenSourceBase directly (mirroring UPCGGenSourceComponent's registration
- * lifecycle — the engine component is not subclassable, its constructor is private) so it
+ * lifecycle -- the engine component is not subclassable, its constructor is private) so it
  * is a drop-in replacement: position is the owner's location, direction the owner's forward.
  */
 UCLASS(BlueprintType, ClassGroup = (Procedural), DisplayName = "PCGEx Generation Source", meta = (BlueprintSpawnableComponent, PrioritizeCategories = "PCG"))
-class PCGEXSCHEDULINGPOLICIES_API UPCGExGenSourceComponent : public UActorComponent, public IPCGGenSourceBase
+class PCGEXSCHEDULINGPOLICIES_API UPCGExGenSourceComponent : public UActorComponent, public IPCGGenSourceBase, public IPCGExChannelProvider
 {
 	GENERATED_BODY()
 
@@ -49,6 +50,10 @@ public:
 	virtual bool IsEquivalent(IPCGGenSourceBase* InOther, const FPCGRuntimeGenContext& InContext) const override;
 	virtual FString GetDebugName() const override { return GetName(); }
 	//~ End IPCGGenSourceBase interface
+
+	//~ Begin IPCGExChannelProvider interface
+	virtual void GetSchedulingChannels(TArray<FName>& OutChannels) const override { OutChannels = Channels.Channels; }
+	//~ End IPCGExChannelProvider interface
 
 	/** Channels this source broadcasts on. Channel-filtered policies only react when their selection overlaps. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "PCG")

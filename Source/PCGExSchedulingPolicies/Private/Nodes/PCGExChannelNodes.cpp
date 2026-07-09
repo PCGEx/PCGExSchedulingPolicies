@@ -25,7 +25,7 @@ namespace PCGExChannelNodes
 
 	struct FResolvedChannels
 	{
-		/** False when executing outside the runtime generation system (or no subsystem) — fallback applies. */
+		/** False when executing outside the runtime generation system (or no subsystem) -- fallback applies. */
 		bool bResolved = false;
 
 		/** Union of the channel masks of the generation sources within radius. */
@@ -64,8 +64,11 @@ namespace PCGExChannelNodes
 			return Result;
 		}
 
-		// Local (partitioned) components report their cell bounds — per-cell accuracy.
+		// Local (partitioned) components report their cell bounds -- per-cell accuracy.
+		// Bare originals can yield an invalid box: fall back to the execution transform's
+		// origin so the radius filter never silently fails open (matching every source).
 		const FBox Bounds = State.GetBounds();
+		const FVector FallbackOrigin = State.GetTransform().GetLocation();
 
 		double Radius = InSettings->CustomRadius;
 		if (InSettings->RadiusMode == EPCGExChannelRadiusMode::GenerationRadius)
@@ -78,7 +81,11 @@ namespace PCGExChannelNodes
 
 		for (const FPCGExActiveSourcesSnapshot::FSourceState& Source : Result.Snapshot->Sources)
 		{
-			if (Bounds.IsValid && Bounds.ComputeSquaredDistanceToPoint(Source.Position) > RadiusSquared)
+			const double DistanceSquared = Bounds.IsValid
+				                               ? Bounds.ComputeSquaredDistanceToPoint(Source.Position)
+				                               : FVector::DistSquared(FallbackOrigin, Source.Position);
+
+			if (DistanceSquared > RadiusSquared)
 			{
 				continue;
 			}
@@ -91,18 +98,13 @@ namespace PCGExChannelNodes
 		return Result;
 	}
 
-	FString JoinChannelNames(const FPCGExChannelSelector& InChannels)
+	/** Bitmask with one set bit per output pin (bits = DEACTIVATED pins when written to InactiveOutputPinBitmask). */
+	FORCEINLINE uint64 FullPinMask(const int32 NumPins)
 	{
-		FString Joined;
-		for (const FName& Channel : InChannels.Channels)
-		{
-			if (!Joined.IsEmpty()) { Joined += TEXT(", "); }
-			Joined += Channel.ToString();
-		}
-		return Joined;
+		return NumPins >= 64 ? ~uint64(0) : ((uint64(1) << NumPins) - 1);
 	}
 
-	/** Local copy of PCGGather::GatherDataForPin — the engine helper is not exported (no PCG_API). */
+	/** Local copy of PCGGather::GatherDataForPin -- the engine helper is not exported (no PCG_API). */
 	FPCGDataCollection GatherDataForPin(const FPCGDataCollection& InputData, const FName InputLabel, const FName OutputLabel)
 	{
 		TArray<FPCGTaggedData> GatheredData = InputData.GetInputsByPin(InputLabel);
@@ -141,7 +143,7 @@ FText UPCGExChannelGateSettings::GetDefaultNodeTitle() const
 
 FText UPCGExChannelGateSettings::GetNodeTooltipText() const
 {
-	return LOCTEXT("GateNodeTooltip", "Forwards input data only when the channel condition holds for the generation sources around the executing component. Never cached — results depend on live world state.");
+	return LOCTEXT("GateNodeTooltip", "Forwards input data only when the channel condition holds for the generation sources around the executing component. Never cached -- results depend on live world state.");
 }
 
 EPCGChangeType UPCGExChannelGateSettings::GetChangeTypeForProperty(const FName& InPropertyName) const
@@ -160,7 +162,7 @@ EPCGChangeType UPCGExChannelGateSettings::GetChangeTypeForProperty(const FName& 
 
 FString UPCGExChannelGateSettings::GetAdditionalTitleInformation() const
 {
-	return PCGExChannelNodes::JoinChannelNames(Channels);
+	return PCGExScheduling::JoinChannelNames(Channels.Channels);
 }
 
 TArray<FPCGPinProperties> UPCGExChannelGateSettings::InputPinProperties() const
@@ -229,20 +231,23 @@ bool FPCGExChannelGateElement::ExecuteInternal(FPCGContext* Context) const
 		}
 	}
 
+	// Pins: [Out] (+ [Blocked] when enabled) -- compute the deactivation mask from the pin
+	// count and the routed index rather than hard-coding positional literals.
+	const int32 NumPins = Settings->bOutputBlockedPin ? 2 : 1;
+	uint64 InactiveMask = PCGExChannelNodes::FullPinMask(NumPins);
+
 	if (bPass)
 	{
 		Context->OutputData = PCGExChannelNodes::GatherDataForPin(Context->InputData, PCGPinConstants::DefaultInputLabel, PCGPinConstants::DefaultOutputLabel);
-		Context->OutputData.InactiveOutputPinBitmask = Settings->bOutputBlockedPin ? 2 : 0;
+		InactiveMask &= ~(uint64(1) << 0);
 	}
 	else if (Settings->bOutputBlockedPin)
 	{
 		Context->OutputData = PCGExChannelNodes::GatherDataForPin(Context->InputData, PCGPinConstants::DefaultInputLabel, PCGExChannelNodes::BlockedPinLabel);
-		Context->OutputData.InactiveOutputPinBitmask = 1;
+		InactiveMask &= ~(uint64(1) << 1);
 	}
-	else
-	{
-		Context->OutputData.InactiveOutputPinBitmask = 1;
-	}
+
+	Context->OutputData.InactiveOutputPinBitmask = InactiveMask;
 
 	return true;
 }
@@ -259,7 +264,7 @@ FText UPCGExChannelSwitchSettings::GetDefaultNodeTitle() const
 
 FText UPCGExChannelSwitchSettings::GetNodeTooltipText() const
 {
-	return LOCTEXT("SwitchNodeTooltip", "Routes input data to one output pin per selected channel, based on the channels active around the executing component. Unmatched data goes to 'Default'. Never cached — results depend on live world state.");
+	return LOCTEXT("SwitchNodeTooltip", "Routes input data to one output pin per selected channel, based on the channels active around the executing component. Unmatched data goes to 'Default'. Never cached -- results depend on live world state.");
 }
 
 EPCGChangeType UPCGExChannelSwitchSettings::GetChangeTypeForProperty(const FName& InPropertyName) const
@@ -269,7 +274,7 @@ EPCGChangeType UPCGExChannelSwitchSettings::GetChangeTypeForProperty(const FName
 	if (InPropertyName == GET_MEMBER_NAME_CHECKED(UPCGExChannelSwitchSettings, bEnabled)
 		|| InPropertyName == GET_MEMBER_NAME_CHECKED(UPCGExChannelSwitchSettings, Channels))
 	{
-		// Channel selection defines the output pins — structural.
+		// Channel selection defines the output pins -- structural.
 		ChangeType |= EPCGChangeType::Structural;
 	}
 
@@ -279,7 +284,7 @@ EPCGChangeType UPCGExChannelSwitchSettings::GetChangeTypeForProperty(const FName
 
 FString UPCGExChannelSwitchSettings::GetAdditionalTitleInformation() const
 {
-	return PCGExChannelNodes::JoinChannelNames(Channels);
+	return PCGExScheduling::JoinChannelNames(Channels.Channels);
 }
 
 void UPCGExChannelSwitchSettings::GetOutputPinLabels(TArray<FName>& OutLabels) const
@@ -291,14 +296,18 @@ void UPCGExChannelSwitchSettings::GetOutputPinLabels(TArray<FName>& OutLabels) c
 
 	for (const FName& Channel : Channels.Channels)
 	{
-		if (!Channel.IsNone() && !OutLabels.Contains(Channel))
+		// A channel named like the reserved fallback pin must not collide with it -- the
+		// engine would drop the duplicate pin while the routing bitmask still indexes both.
+		if (Channel.IsNone() || Channel == PCGExChannelNodes::DefaultPinLabel || OutLabels.Contains(Channel))
 		{
-			OutLabels.Add(Channel);
+			continue;
+		}
 
-			if (OutLabels.Num() >= MaxChannelPins)
-			{
-				break;
-			}
+		OutLabels.Add(Channel);
+
+		if (OutLabels.Num() >= MaxChannelPins)
+		{
+			break;
 		}
 	}
 
@@ -353,7 +362,7 @@ bool FPCGExChannelSwitchElement::ExecuteInternal(FPCGContext* Context) const
 	{
 		for (int32 Index = 0; Index < DefaultPinIndex; ++Index)
 		{
-			const PCGExScheduling::FChannelMask ChannelBit = Resolved.Snapshot->ResolveNames({Labels[Index]});
+			const PCGExScheduling::FChannelMask ChannelBit = Resolved.Snapshot->ResolveName(Labels[Index]);
 			if (ChannelBit != 0 && (Resolved.ActiveMask & ChannelBit) != 0)
 			{
 				TargetPins.Add(Index);
@@ -373,8 +382,7 @@ bool FPCGExChannelSwitchElement::ExecuteInternal(FPCGContext* Context) const
 	// Route the inputs to every selected pin.
 	const TArray<FPCGTaggedData> Inputs = Context->InputData.GetInputsByPin(PCGPinConstants::DefaultInputLabel);
 
-	// Labels.Num() is capped at 64 (63 channels + Default), but keep the shift safe regardless.
-	uint64 InactiveMask = Labels.Num() >= 64 ? ~uint64(0) : ((uint64(1) << Labels.Num()) - 1);
+	uint64 InactiveMask = PCGExChannelNodes::FullPinMask(Labels.Num());
 
 	for (const int32 PinIndex : TargetPins)
 	{
@@ -404,7 +412,7 @@ FText UPCGExGetActiveChannelsSettings::GetDefaultNodeTitle() const
 
 FText UPCGExGetActiveChannelsSettings::GetNodeTooltipText() const
 {
-	return LOCTEXT("GetActiveChannelsNodeTooltip", "Outputs an attribute set with one 'Channel' entry per channel active around the executing component. Empty outside the runtime generation system. Never cached — results depend on live world state.");
+	return LOCTEXT("GetActiveChannelsNodeTooltip", "Outputs an attribute set with one 'Channel' entry per channel active around the executing component. Empty outside the runtime generation system. Never cached -- results depend on live world state.");
 }
 #endif // WITH_EDITOR
 
@@ -437,9 +445,9 @@ bool FPCGExGetActiveChannelsElement::ExecuteInternal(FPCGContext* Context) const
 
 	const PCGExChannelNodes::FResolvedChannels Resolved = PCGExChannelNodes::ResolveActiveChannels(Context, Settings);
 
-	if (Resolved.bResolved && Resolved.Snapshot && ChannelAttribute)
+	if (Resolved.bResolved && Resolved.Snapshot && Resolved.Snapshot->ChannelTable && ChannelAttribute)
 	{
-		for (const TPair<FName, PCGExScheduling::FChannelMask>& Entry : Resolved.Snapshot->ChannelTable)
+		for (const TPair<FName, PCGExScheduling::FChannelMask>& Entry : *Resolved.Snapshot->ChannelTable)
 		{
 			if ((Resolved.ActiveMask & Entry.Value) != 0)
 			{

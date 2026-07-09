@@ -14,7 +14,7 @@
 
 TOptional<double> UPCGExSchedulingConstraintDirectionAlignment::CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid) const
 {
-	const TOptional<FVector> Position = InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
 	const TOptional<FVector> Direction = InGenSource ? InGenSource->GetDirection() : TOptional<FVector>();
 
 	if (!Position.IsSet() || !Direction.IsSet())
@@ -27,11 +27,12 @@ TOptional<double> UPCGExSchedulingConstraintDirectionAlignment::CalcPriority(con
 
 	if (ToCell.IsNearlyZero())
 	{
-		// Source inside the cell: maximum priority (mirrors the stock policy).
-		return 1.0;
+		// Source inside the cell: maximum priority (mirrors the stock policy) -- flipped
+		// when inverted, so 'favor cells behind' doesn't crown the source's own cell.
+		return bInvert ? 0.0 : 1.0;
 	}
 
-	// Dot product remapped to [0, 1] — the stock policy's Lerp(0.5, 1.0, Dot).
+	// Dot product remapped to [0, 1] -- the stock policy's Lerp(0.5, 1.0, Dot).
 	double Alignment = (FVector::DotProduct(ToCell.GetSafeNormal(), Direction.GetValue()) + 1.0) * 0.5;
 	if (bInvert)
 	{

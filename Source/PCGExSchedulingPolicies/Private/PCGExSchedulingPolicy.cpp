@@ -8,7 +8,6 @@
 #include "PCGExSchedulingSubsystem.h"
 
 #include "RuntimeGen/GenSources/PCGGenSourceBase.h"
-#include "RuntimeGen/GenSources/PCGGenSourceEditorCamera.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(PCGExSchedulingPolicy)
 
@@ -129,7 +128,7 @@ void UPCGExSchedulingPolicy::PostEditChangeProperty(FPropertyChangedEvent& Prope
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
-	// Force channel mask re-resolution on any edit — cheap, and covers Channels edits.
+	// Force channel mask re-resolution on any edit -- cheap, and covers Channels edits.
 	CachedChannelRevision = 0;
 }
 #endif
@@ -157,7 +156,8 @@ bool UPCGExSchedulingPolicy::PassesSourceFilters(const IPCGGenSourceBase* InGenS
 		return true;
 	}
 
-	if (bEditorCameraBypassesChannels && Cast<UPCGGenSourceEditorCamera>(InGenSource))
+	// Camera identity has a single home on the subsystem -- the node snapshot uses the same test.
+	if (bEditorCameraBypassesChannels && UPCGExSchedulingSubsystem::IsEditorCameraSource(InGenSource))
 	{
 		return true;
 	}
@@ -221,6 +221,6 @@ PCGExScheduling::FChannelMask UPCGExSchedulingPolicy::GetPolicyChannelMask() con
 		}
 	}
 
-	// Worker threads read the (possibly one-tick stale) cached value — see member comment.
+	// Worker threads read the (possibly one-tick stale) cached value -- see member comment.
 	return CachedChannelMask;
 }

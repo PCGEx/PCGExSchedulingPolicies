@@ -23,7 +23,7 @@ struct FPCGExTargetTestContext
 
 	bool bUse2DGrid = false;
 
-	/** True on the game thread — precise actor-touching tests are only allowed there. */
+	/** True on the game thread -- precise actor-touching tests are only allowed there. */
 	bool bGameThread = false;
 };
 
@@ -31,7 +31,7 @@ struct FPCGExTargetTestContext
  * Base for world-region target constraints: cells generate while they intersect regions
  * derived from target actors (bounds, volumes, splines). Targets are discovered through
  * explicit references and/or an amortized actor-tag query, resolved into immutable
- * snapshots by the scheduling subsystem, and optionally tracked for movement — moving
+ * snapshots by the scheduling subsystem, and optionally tracked for movement -- moving
  * targets force a runtime-gen rescan of the owning component (engine change detection
  * only reacts to generation source movement).
  *
@@ -44,7 +44,7 @@ class PCGEXSCHEDULINGPOLICIES_API UPCGExSchedulingConstraintTargetsBase : public
 	GENERATED_BODY()
 
 public:
-	/** Explicit target actors (resolved when loaded — never force-loads). */
+	/** Explicit target actors (resolved when loaded -- never force-loads). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Settings)
 	TArray<TSoftObjectPtr<AActor>> TargetActors;
 
@@ -99,8 +99,11 @@ protected:
 	/** Cell-vs-region test. Must be worker-safe unless InContext.bGameThread. */
 	virtual bool TestShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const { return false; }
 
-	/** Distance from the cell to the region, for priority. Game thread only. */
-	virtual double DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, bool bUse2DGrid) const { return TNumericLimits<double>::Max(); }
+	/** Flat world-space expansion applied to region bounds by the shared box machinery. */
+	virtual float GetBoundsExpansion() const { return 0.0f; }
+
+	/** Distance from the cell to the region, for priority -- shared box-based default. Game thread only. */
+	virtual double DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, bool bUse2DGrid) const;
 
 	/** Query descriptor handed to the subsystem registry. */
 	FPCGExTargetQuery BuildTargetQuery() const;
@@ -110,6 +113,10 @@ protected:
 
 	/** Region scale for a gate evaluation: enlarged for regular cleanup, shrunk for inverted cleanup. */
 	double GetRegionScale(bool bExpanded) const;
+
+private:
+	/** One-time consumer registration -- afterwards the per-cell resolve fast path skips the outer-walk and consumer lookup. */
+	mutable bool bConsumerRegistered = false;
 };
 
 /** Cells generate while they overlap target actors' bounds. */
@@ -124,8 +131,8 @@ public:
 	float BoundsExpansion = 0.0f;
 
 protected:
+	virtual float GetBoundsExpansion() const override { return BoundsExpansion; }
 	virtual bool TestShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const override;
-	virtual double DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, bool bUse2DGrid) const override;
 };
 
 /** Cells generate while they overlap target volumes. Bounds-box test by default; optional precise brush test on the generation path. */
@@ -141,16 +148,18 @@ public:
 
 	/**
 	 * Precise brush containment test (cell center + radius against the volume brush).
-	 * Applies to the game-thread generation path only — the worker-thread cleanup path
-	 * always uses the bounds box, which makes cleanup slightly conservative.
+	 * Applies to the game-thread generation path on 3D grids only -- 2D grids and the
+	 * worker-thread cleanup path always use the bounds box, which makes cleanup slightly
+	 * conservative. Ignored when Invert is set (the box/brush asymmetry would make
+	 * inverted cells flicker between generate and cleanup).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings)
 	bool bPreciseVolumeTest = false;
 
 protected:
 	virtual EPCGExTargetGeometry GetTargetGeometry() const override { return EPCGExTargetGeometry::Volume; }
+	virtual float GetBoundsExpansion() const override { return BoundsExpansion; }
 	virtual bool TestShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const override;
-	virtual double DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, bool bUse2DGrid) const override;
 };
 
 /** Cells generate while they are within a corridor radius of target splines. Actors without splines fall back to their bounds. */

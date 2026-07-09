@@ -89,7 +89,7 @@ void UPCGExSchedulingSettings::RebuildLookups()
 
 		if (NameToMask.Contains(Channel.Name))
 		{
-			UE_LOG(LogPCGExScheduling, Warning, TEXT("Duplicate scheduling channel '%s' ignored — only the first entry owns the channel."), *Channel.Name.ToString());
+			UE_LOG(LogPCGExScheduling, Warning, TEXT("Duplicate scheduling channel '%s' ignored -- only the first entry owns the channel."), *Channel.Name.ToString());
 			continue;
 		}
 
@@ -113,7 +113,7 @@ void UPCGExSchedulingSettings::RebuildLookups()
 
 	if (!IgnoredChannels.IsEmpty())
 	{
-		UE_LOG(LogPCGExScheduling, Warning, TEXT("%d scheduling channel(s) ignored — only %d channels are supported: %s"),
+		UE_LOG(LogPCGExScheduling, Warning, TEXT("%d scheduling channel(s) ignored -- only %d channels are supported: %s"),
 			IgnoredChannels.Num(), PCGExScheduling::MaxChannels, *FString::Join(IgnoredChannels, TEXT(", ")));
 	}
 

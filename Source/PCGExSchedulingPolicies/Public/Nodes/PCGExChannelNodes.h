@@ -38,7 +38,7 @@ enum class EPCGExChannelRadiusMode : uint8
 /**
  * Base for channel-aware graph nodes: gathers the channels of the generation sources
  * around the executing component (the sources 'behind' this execution).
- * Results depend on live world state — these nodes are never cached.
+ * Results depend on live world state -- these nodes are never cached.
  */
 UCLASS(Abstract, ClassGroup = (Procedural))
 class PCGEXSCHEDULINGPOLICIES_API UPCGExChannelNodeSettings : public UPCGSettings
@@ -173,7 +173,7 @@ protected:
 
 /**
  * Outputs an attribute set with one 'Channel' (Name) entry per channel active around the
- * executing component — for custom graph-side logic.
+ * executing component -- for custom graph-side logic.
  */
 UCLASS(BlueprintType, ClassGroup = (Procedural), meta = (Keywords = "channel active get query layer"))
 class PCGEXSCHEDULINGPOLICIES_API UPCGExGetActiveChannelsSettings : public UPCGExChannelNodeSettings

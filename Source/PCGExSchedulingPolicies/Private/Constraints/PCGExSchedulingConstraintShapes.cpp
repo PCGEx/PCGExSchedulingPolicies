@@ -3,11 +3,21 @@
 
 #include "Constraints/PCGExSchedulingConstraintShapes.h"
 
+#include "PCGExSchedulingCommon.h"
+
 #include "RuntimeGen/GenSources/PCGGenSourceBase.h"
 
 #include "Math/Box2D.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(PCGExSchedulingConstraintShapes)
+
+namespace PCGExSchedulingShapes
+{
+	TOptional<FVector> GetSourcePosition(const IPCGGenSourceBase* InGenSource)
+	{
+		return InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
+	}
+}
 
 namespace PCGExSchedulingConstraintShapes
 {
@@ -27,12 +37,6 @@ namespace PCGExSchedulingConstraintShapes
 		}
 
 		return Yaw;
-	}
-
-	/** 1D interval overlap of two centered extents. */
-	FORCEINLINE bool IntervalsOverlap(const double MinA, const double MaxA, const double MinB, const double MaxB)
-	{
-		return MinA <= MaxB && MinB <= MaxA;
 	}
 
 	/**
@@ -115,14 +119,10 @@ namespace PCGExSchedulingConstraintShapes
 		const FVector ToCenter = InSphereCenter - InApex;
 		const double AxialDistance = ToCenter | InAxis;
 
-		// Fully behind the apex plane, or fully beyond the far cap plane.
+		// Fully behind the apex plane, or fully beyond the far cap plane. (No spherical
+		// range cap: the shape is a FLAT-capped cone whose far rim reaches Range/cos(θ)
+		// from the apex -- a |ToCenter| <= Range test would wrongly clip that rim.)
 		if (AxialDistance < -InSphereRadius || AxialDistance - InSphereRadius > InRange)
-		{
-			return false;
-		}
-
-		// Spherical range cap around the apex.
-		if (ToCenter.SizeSquared() > FMath::Square(InRange + InSphereRadius))
 		{
 			return false;
 		}
@@ -146,7 +146,7 @@ namespace PCGExSchedulingConstraintShapes
 
 bool UPCGExSchedulingConstraintSphere::EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid, const bool bExpanded) const
 {
-	const TOptional<FVector> Position = InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
 	if (!Position.IsSet())
 	{
 		// No position: never inside the shape.
@@ -172,7 +172,7 @@ bool UPCGExSchedulingConstraintSphere::EvaluateGate(const IPCGGenSourceBase* InG
 
 TOptional<double> UPCGExSchedulingConstraintSphere::CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid) const
 {
-	const TOptional<FVector> Position = InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
 	if (!Position.IsSet())
 	{
 		return TOptional<double>();
@@ -190,7 +190,7 @@ TOptional<double> UPCGExSchedulingConstraintSphere::CalcPriority(const IPCGGenSo
 
 bool UPCGExSchedulingConstraintCylinder::EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid, const bool bExpanded) const
 {
-	const TOptional<FVector> Position = InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
 	if (!Position.IsSet())
 	{
 		return bInvert;
@@ -235,13 +235,13 @@ bool UPCGExSchedulingConstraintCylinder::EvaluateGate(const IPCGGenSourceBase* I
 
 TOptional<double> UPCGExSchedulingConstraintCylinder::CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid) const
 {
-	const TOptional<FVector> Position = InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
 	if (!Position.IsSet())
 	{
 		return TOptional<double>();
 	}
 
-	// Radial closeness only — vertical position doesn't affect ordering.
+	// Radial closeness only -- vertical position doesn't affect ordering.
 	const FBox2D BoundsXY(FVector2D(InBounds.Min), FVector2D(InBounds.Max));
 	const double RadialDistance = FMath::Sqrt(BoundsXY.ComputeSquaredDistanceToPoint(FVector2D(Position.GetValue())));
 
@@ -254,7 +254,7 @@ TOptional<double> UPCGExSchedulingConstraintCylinder::CalcPriority(const IPCGGen
 
 bool UPCGExSchedulingConstraintBox::EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid, const bool bExpanded) const
 {
-	const TOptional<FVector> Position = InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
 	if (!Position.IsSet())
 	{
 		return bInvert;
@@ -279,15 +279,15 @@ bool UPCGExSchedulingConstraintBox::EvaluateGate(const IPCGGenSourceBase* InGenS
 	else
 	{
 		// World-aligned fast path (also the fallback when the source has no usable yaw).
-		bInside = PCGExSchedulingConstraintShapes::IntervalsOverlap(
+		bInside = PCGExScheduling::IntervalsOverlap(
 				SourcePosition.X - ScaledExtents.X, SourcePosition.X + ScaledExtents.X, InBounds.Min.X, InBounds.Max.X)
-			&& PCGExSchedulingConstraintShapes::IntervalsOverlap(
+			&& PCGExScheduling::IntervalsOverlap(
 				SourcePosition.Y - ScaledExtents.Y, SourcePosition.Y + ScaledExtents.Y, InBounds.Min.Y, InBounds.Max.Y);
 	}
 
 	if (bInside && !bUse2DGrid)
 	{
-		bInside = PCGExSchedulingConstraintShapes::IntervalsOverlap(
+		bInside = PCGExScheduling::IntervalsOverlap(
 			SourcePosition.Z - ScaledExtents.Z, SourcePosition.Z + ScaledExtents.Z, InBounds.Min.Z, InBounds.Max.Z);
 	}
 
@@ -299,7 +299,7 @@ bool UPCGExSchedulingConstraintBox::EvaluateGate(const IPCGGenSourceBase* InGenS
 			FMath::Max(Extents.Y - ShellThickness, 0.0) * InnerScale,
 			FMath::Max(Extents.Z - ShellThickness, 0.0) * InnerScale);
 
-		// The erosion may consume an axis entirely — then there is no interior and the shell is the whole shape.
+		// The erosion may consume an axis entirely -- then there is no interior and the shell is the whole shape.
 		if (InnerExtents.X > 0.0 && InnerExtents.Y > 0.0 && (bUse2DGrid || InnerExtents.Z > 0.0))
 		{
 			bool bFullyInside;
@@ -333,7 +333,7 @@ bool UPCGExSchedulingConstraintBox::EvaluateGate(const IPCGGenSourceBase* InGenS
 
 TOptional<double> UPCGExSchedulingConstraintBox::CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid) const
 {
-	const TOptional<FVector> Position = InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
 	if (!Position.IsSet())
 	{
 		return TOptional<double>();
@@ -370,7 +370,7 @@ TOptional<double> UPCGExSchedulingConstraintBox::CalcPriority(const IPCGGenSourc
 
 bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid, const bool bExpanded) const
 {
-	const TOptional<FVector> Position = InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
 	if (!Position.IsSet())
 	{
 		return bInvert;
@@ -429,9 +429,10 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 			SphereExtents.Z = 0.0;
 		}
 
-		const double HalfAngleRadians = FMath::DegreesToRadians(FMath::Clamp(HalfAngleDegrees, 1.0, 89.0));
-		const double CosHalfAngle = FMath::Cos(HalfAngleRadians);
-		const double SinHalfAngle = FMath::Sin(HalfAngleRadians);
+		double CosHalfAngle = 0.0;
+		double SinHalfAngle = 1.0;
+		GetHalfAngleTrig(CosHalfAngle, SinHalfAngle);
+
 		const double SphereRadius = SphereExtents.Size();
 
 		bInside = PCGExSchedulingConstraintShapes::ConeIntersectsSphere(
@@ -439,10 +440,12 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 
 		if (bInside && bHollow)
 		{
-			// Inner cone = the cone eroded by the shell thickness (apex shifts forward by T/sin,
-			// range shrinks by T), then scaled by the mirrored hysteresis factor.
+			// Inner cone = the cone eroded by the shell thickness: the apex shifts forward by
+			// T/sin(θ) (lateral erosion) and the far cap moves in to Range − T. The range below
+			// is measured FROM the shifted apex, hence the extra T/sin(θ) subtraction -- without
+			// it the interior overshoots the far cap and swallows the far shell.
 			const double InnerScale = GetInnerGateScale(bExpanded);
-			const double InnerRange = FMath::Max(Range - ShellThickness, 0.0) * InnerScale;
+			const double InnerRange = FMath::Max(Range - ShellThickness - ShellThickness / SinHalfAngle, 0.0) * InnerScale;
 
 			if (InnerRange > 0.0)
 			{
@@ -462,7 +465,7 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 
 TOptional<double> UPCGExSchedulingConstraintCone::CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid) const
 {
-	const TOptional<FVector> Position = InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
 	if (!Position.IsSet())
 	{
 		return TOptional<double>();
