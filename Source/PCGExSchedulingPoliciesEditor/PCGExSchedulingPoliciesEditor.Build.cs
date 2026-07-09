@@ -19,13 +19,14 @@ public class PCGExSchedulingPoliciesEditor : ModuleRules
 		});
 
 		// Common editor foundations for detail customizations and Slate widgets.
-		// Add DeveloperSettings / EditorWidgets / Projects / InputCore as features land.
+		// Add EditorWidgets / Projects / InputCore as features land.
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"Slate",
 			"SlateCore",
-			"UnrealEd",
-			"PropertyEditor",
+			"UnrealEd",       // FScopedTransaction
+			"PropertyEditor", // RegisterCustomPropertyTypeLayout
+			"Settings",       // ISettingsModule ("Manage Channels…" shortcut)
 		});
 	}
 }

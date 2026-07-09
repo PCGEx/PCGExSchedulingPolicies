@@ -3,7 +3,11 @@
 
 #include "PCGExSchedulingPolicies.h"
 
+#include "PCGExSchedulingCommon.h"
+
 #include "Modules/ModuleManager.h"
+
+DEFINE_LOG_CATEGORY(LogPCGExScheduling)
 
 #define LOCTEXT_NAMESPACE "FPCGExSchedulingPoliciesModule"
 

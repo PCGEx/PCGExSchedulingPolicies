@@ -16,6 +16,7 @@ public class PCGExSchedulingPolicies : ModuleRules
 			"CoreUObject",
 			"Engine",
 			"PCG",
+			"DeveloperSettings", // UPCGExSchedulingSettings (UDeveloperSettings, public header)
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
