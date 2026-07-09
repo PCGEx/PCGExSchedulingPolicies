@@ -62,6 +62,50 @@ namespace PCGExSchedulingConstraintShapes
 		return true;
 	}
 
+	/** True when all four XY corners of the cell lie inside a yaw-rotated rectangle. */
+	bool CellCornersInsideYawRectXY(const FBox& InCell, const FVector2D& InCenter, const FVector2D& InForward, const FVector2D& InHalfExtents)
+	{
+		const FVector2D Right(-InForward.Y, InForward.X);
+		const FVector2D Corners[4] = {
+			FVector2D(InCell.Min.X, InCell.Min.Y), FVector2D(InCell.Max.X, InCell.Min.Y),
+			FVector2D(InCell.Min.X, InCell.Max.Y), FVector2D(InCell.Max.X, InCell.Max.Y)};
+
+		for (const FVector2D& Corner : Corners)
+		{
+			const FVector2D Delta = Corner - InCenter;
+			if (FMath::Abs(Delta | InForward) > InHalfExtents.X || FMath::Abs(Delta | Right) > InHalfExtents.Y)
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/** True when the sphere fits entirely inside the cone (conservative near the boundary). */
+	bool ConeContainsSphere(const FVector& InApex, const FVector& InAxis, const double InRange, const double InCosHalfAngle, const double InSinHalfAngle, const FVector& InSphereCenter, const double InSphereRadius)
+	{
+		const FVector ToCenter = InSphereCenter - InApex;
+
+		// Cap: the whole sphere before the far plane.
+		if ((ToCenter | InAxis) + InSphereRadius > InRange)
+		{
+			return false;
+		}
+
+		// Lateral: center inside the cone eroded by the sphere radius (apex shifted forward).
+		const FVector ErodedApex = InApex + (InSphereRadius / InSinHalfAngle) * InAxis;
+		const FVector FromErodedApex = InSphereCenter - ErodedApex;
+		const double ErodedAxialDistance = FromErodedApex | InAxis;
+
+		if (ErodedAxialDistance < 0.0)
+		{
+			return false;
+		}
+
+		return FMath::Square(ErodedAxialDistance) >= FMath::Square(InCosHalfAngle) * FromErodedApex.SizeSquared();
+	}
+
 	/**
 	 * Conservative-inclusive sphere-vs-cone intersection (Eberly's expanded-cone test),
 	 * with plane-capped apex/far checks padded by the sphere radius.
@@ -111,7 +155,17 @@ bool UPCGExSchedulingConstraintSphere::EvaluateGate(const IPCGGenSourceBase* InG
 
 	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Position.GetValue(), InBounds, bUse2DGrid);
 	const double ScaledRadius = Radius * GetGateScale(bExpanded);
-	const bool bInside = InBounds.ComputeSquaredDistanceToPoint(SourcePosition) <= ScaledRadius * ScaledRadius;
+	bool bInside = InBounds.ComputeSquaredDistanceToPoint(SourcePosition) <= ScaledRadius * ScaledRadius;
+
+	if (bInside && bHollow)
+	{
+		const double InnerRadius = FMath::Max(Radius - ShellThickness, 0.0) * GetInnerGateScale(bExpanded);
+		if (InnerRadius > 0.0 && PCGExSchedulingShapes::MaxSquaredDistanceToPoint(InBounds, SourcePosition, bUse2DGrid) <= InnerRadius * InnerRadius)
+		{
+			// Cell fully inside the hollow interior.
+			bInside = false;
+		}
+	}
 
 	return bInside != bInvert;
 }
@@ -154,6 +208,26 @@ bool UPCGExSchedulingConstraintCylinder::EvaluateGate(const IPCGGenSourceBase* I
 	{
 		const double ScaledHalfHeight = HalfHeight * Scale;
 		bInside = (InBounds.Min.Z <= SourcePosition.Z + ScaledHalfHeight) && (InBounds.Max.Z >= SourcePosition.Z - ScaledHalfHeight);
+	}
+
+	if (bInside && bHollow)
+	{
+		const double InnerScale = GetInnerGateScale(bExpanded);
+		const double InnerRadius = FMath::Max(Radius - ShellThickness, 0.0) * InnerScale;
+		const double InnerHalfHeight = FMath::Max(HalfHeight - ShellThickness, 0.0) * InnerScale;
+
+		if (InnerRadius > 0.0 && (bUse2DGrid || InnerHalfHeight > 0.0))
+		{
+			// Radial: farthest XY point of the cell within the inner radius.
+			const bool bFullyInsideRadially = PCGExSchedulingShapes::MaxSquaredDistanceToPoint(InBounds, SourcePosition, /*bUse2DGrid=*/true) <= InnerRadius * InnerRadius;
+			const bool bFullyInsideVertically = bUse2DGrid
+				|| ((InBounds.Min.Z >= SourcePosition.Z - InnerHalfHeight) && (InBounds.Max.Z <= SourcePosition.Z + InnerHalfHeight));
+
+			if (bFullyInsideRadially && bFullyInsideVertically)
+			{
+				bInside = false;
+			}
+		}
 	}
 
 	return bInside != bInvert;
@@ -215,6 +289,43 @@ bool UPCGExSchedulingConstraintBox::EvaluateGate(const IPCGGenSourceBase* InGenS
 	{
 		bInside = PCGExSchedulingConstraintShapes::IntervalsOverlap(
 			SourcePosition.Z - ScaledExtents.Z, SourcePosition.Z + ScaledExtents.Z, InBounds.Min.Z, InBounds.Max.Z);
+	}
+
+	if (bInside && bHollow)
+	{
+		const double InnerScale = GetInnerGateScale(bExpanded);
+		const FVector InnerExtents(
+			FMath::Max(Extents.X - ShellThickness, 0.0) * InnerScale,
+			FMath::Max(Extents.Y - ShellThickness, 0.0) * InnerScale,
+			FMath::Max(Extents.Z - ShellThickness, 0.0) * InnerScale);
+
+		// The erosion may consume an axis entirely — then there is no interior and the shell is the whole shape.
+		if (InnerExtents.X > 0.0 && InnerExtents.Y > 0.0 && (bUse2DGrid || InnerExtents.Z > 0.0))
+		{
+			bool bFullyInside;
+
+			if (YawDirection.IsSet())
+			{
+				bFullyInside = PCGExSchedulingConstraintShapes::CellCornersInsideYawRectXY(
+					InBounds, FVector2D(SourcePosition), YawDirection.GetValue(), FVector2D(InnerExtents.X, InnerExtents.Y));
+			}
+			else
+			{
+				bFullyInside =
+					InBounds.Min.X >= SourcePosition.X - InnerExtents.X && InBounds.Max.X <= SourcePosition.X + InnerExtents.X
+					&& InBounds.Min.Y >= SourcePosition.Y - InnerExtents.Y && InBounds.Max.Y <= SourcePosition.Y + InnerExtents.Y;
+			}
+
+			if (bFullyInside && !bUse2DGrid)
+			{
+				bFullyInside = InBounds.Min.Z >= SourcePosition.Z - InnerExtents.Z && InBounds.Max.Z <= SourcePosition.Z + InnerExtents.Z;
+			}
+
+			if (bFullyInside)
+			{
+				bInside = false;
+			}
+		}
 	}
 
 	return bInside != bInvert;
@@ -295,8 +406,17 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 
 	if (Axis.IsZero())
 	{
-		// No usable direction: fall back to a sphere of Range.
+		// No usable direction: fall back to a sphere of Range (hollow becomes a spherical shell).
 		bInside = InBounds.ComputeSquaredDistanceToPoint(Apex) <= ScaledRange * ScaledRange;
+
+		if (bInside && bHollow)
+		{
+			const double InnerRadius = FMath::Max(Range - ShellThickness, 0.0) * GetInnerGateScale(bExpanded);
+			if (InnerRadius > 0.0 && PCGExSchedulingShapes::MaxSquaredDistanceToPoint(InBounds, Apex, bUse2DGrid) <= InnerRadius * InnerRadius)
+			{
+				bInside = false;
+			}
+		}
 	}
 	else
 	{
@@ -310,10 +430,31 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 		}
 
 		const double HalfAngleRadians = FMath::DegreesToRadians(FMath::Clamp(HalfAngleDegrees, 1.0, 89.0));
-		const double SphereRadius = SphereExtents.Size() * Scale;
+		const double CosHalfAngle = FMath::Cos(HalfAngleRadians);
+		const double SinHalfAngle = FMath::Sin(HalfAngleRadians);
+		const double SphereRadius = SphereExtents.Size();
 
 		bInside = PCGExSchedulingConstraintShapes::ConeIntersectsSphere(
-			Apex, Axis, ScaledRange, FMath::Cos(HalfAngleRadians), FMath::Sin(HalfAngleRadians), SphereCenter, SphereRadius);
+			Apex, Axis, ScaledRange, CosHalfAngle, SinHalfAngle, SphereCenter, SphereRadius * Scale);
+
+		if (bInside && bHollow)
+		{
+			// Inner cone = the cone eroded by the shell thickness (apex shifts forward by T/sin,
+			// range shrinks by T), then scaled by the mirrored hysteresis factor.
+			const double InnerScale = GetInnerGateScale(bExpanded);
+			const double InnerRange = FMath::Max(Range - ShellThickness, 0.0) * InnerScale;
+
+			if (InnerRange > 0.0)
+			{
+				const FVector InnerApex = Apex + Axis * ((ShellThickness / SinHalfAngle) * InnerScale);
+
+				if (PCGExSchedulingConstraintShapes::ConeContainsSphere(
+					InnerApex, Axis, InnerRange, CosHalfAngle, SinHalfAngle, SphereCenter, SphereRadius))
+				{
+					bInside = false;
+				}
+			}
+		}
 	}
 
 	return bInside != bInvert;

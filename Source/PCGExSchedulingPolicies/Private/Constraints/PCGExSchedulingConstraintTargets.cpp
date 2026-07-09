@@ -79,6 +79,47 @@ namespace PCGExSchedulingConstraintTargets
 		if (bUse2DGrid) { Extents.Z = 0.0; }
 		return Extents.Size();
 	}
+
+	/** XY point-in-polygon (crossing number) over a closed polyline. */
+	bool PointInPolygonXY(const FVector& InPoint, const TArray<FVector>& InPoints)
+	{
+		bool bInside = false;
+		const int32 NumPoints = InPoints.Num();
+
+		for (int32 Index = 0, PrevIndex = NumPoints - 1; Index < NumPoints; PrevIndex = Index++)
+		{
+			const FVector& A = InPoints[Index];
+			const FVector& B = InPoints[PrevIndex];
+
+			if ((A.Y > InPoint.Y) != (B.Y > InPoint.Y))
+			{
+				const double CrossingX = (B.X - A.X) * (InPoint.Y - A.Y) / (B.Y - A.Y) + A.X;
+				if (InPoint.X < CrossingX)
+				{
+					bInside = !bInside;
+				}
+			}
+		}
+
+		return bInside;
+	}
+
+	/** Closed-spline interior test: XY polygon fill, vertical reach = the polyline's Z range plus the corridor radius. */
+	bool InsideFilledSpline(const FPCGExTargetShape& InShape, const FVector& InCellCenter, const double InCorridorRadius, const bool bUse2DGrid)
+	{
+		if (!InShape.bClosedSpline || InShape.SplinePoints.Num() < 3)
+		{
+			return false;
+		}
+
+		if (!bUse2DGrid
+			&& (InCellCenter.Z < InShape.Bounds.Min.Z - InCorridorRadius || InCellCenter.Z > InShape.Bounds.Max.Z + InCorridorRadius))
+		{
+			return false;
+		}
+
+		return PointInPolygonXY(InCellCenter, InShape.SplinePoints);
+	}
 }
 
 #pragma region UPCGExSchedulingConstraintTargetsBase
@@ -269,7 +310,14 @@ bool UPCGExSchedulingConstraintTargetSpline::TestShape(const FPCGExTargetShape& 
 
 	// Conservative-inclusive: distance from the cell center to the polyline vs corridor + cell circumradius.
 	const double Threshold = Radius + PCGExSchedulingConstraintTargets::CellCircumradius(InBounds, InContext.bUse2DGrid);
-	return PCGExSchedulingConstraintTargets::PolylineDistance(InShape, InBounds, InContext.bUse2DGrid) <= Threshold;
+	if (PCGExSchedulingConstraintTargets::PolylineDistance(InShape, InBounds, InContext.bUse2DGrid) <= Threshold)
+	{
+		return true;
+	}
+
+	// Interior fill for closed splines. Membership deep inside is scale-independent —
+	// the corridor (scaled) provides the hysteresis band at the polygon boundary.
+	return bFillClosedSplines && PCGExSchedulingConstraintTargets::InsideFilledSpline(InShape, InBounds.GetCenter(), Radius, InContext.bUse2DGrid);
 }
 
 double UPCGExSchedulingConstraintTargetSpline::DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const bool bUse2DGrid) const
@@ -277,6 +325,11 @@ double UPCGExSchedulingConstraintTargetSpline::DistanceToShape(const FPCGExTarge
 	if (InShape.SplinePoints.Num() < 2)
 	{
 		return PCGExSchedulingConstraintTargets::BoxToBoxDistance(InShape.Bounds.ExpandBy(SplineRadius), InBounds, bUse2DGrid);
+	}
+
+	if (bFillClosedSplines && PCGExSchedulingConstraintTargets::InsideFilledSpline(InShape, InBounds.GetCenter(), SplineRadius, bUse2DGrid))
+	{
+		return 0.0;
 	}
 
 	// Distance to the corridor surface (0 inside).

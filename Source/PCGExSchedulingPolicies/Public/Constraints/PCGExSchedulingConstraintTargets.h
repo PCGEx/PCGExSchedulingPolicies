@@ -164,6 +164,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = 1.0, Units = "cm"))
 	float SplineRadius = 1000.0f;
 
+	/**
+	 * Also treat the interior of closed splines as inside (XY polygon fill; vertical reach spans the
+	 * spline's Z range plus the corridor radius). The corridor provides the boundary hysteresis.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings)
+	bool bFillClosedSplines = false;
+
 	/** Max deviation when flattening splines to polylines. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Settings, AdvancedDisplay, meta = (ClampMin = 1.0, Units = "cm"))
 	float SplineErrorTolerance = 50.0f;

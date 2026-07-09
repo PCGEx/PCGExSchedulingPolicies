@@ -18,6 +18,15 @@ namespace PCGExSchedulingShapes
 		if (bUse2DGrid) { OutPosition.Z = InBounds.Min.Z; }
 		return OutPosition;
 	}
+
+	/** Squared distance from the FARTHEST point of a box to a point (Z ignored on 2D grids) — 'cell fully inside sphere' tests. */
+	inline double MaxSquaredDistanceToPoint(const FBox& InBounds, const FVector& InPoint, const bool bUse2DGrid)
+	{
+		const double DX = FMath::Max(FMath::Abs(InBounds.Min.X - InPoint.X), FMath::Abs(InBounds.Max.X - InPoint.X));
+		const double DY = FMath::Max(FMath::Abs(InBounds.Min.Y - InPoint.Y), FMath::Abs(InBounds.Max.Y - InPoint.Y));
+		const double DZ = bUse2DGrid ? 0.0 : FMath::Max(FMath::Abs(InBounds.Min.Z - InPoint.Z), FMath::Abs(InBounds.Max.Z - InPoint.Z));
+		return DX * DX + DY * DY + DZ * DZ;
+	}
 }
 
 /**
@@ -34,6 +43,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = 1.0))
 	double CleanupScale = 1.1;
 
+	/** Only the shell of the shape gates generation — cells fully inside the hollow interior are excluded. Affects gating only, not priority. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings)
+	bool bHollow = false;
+
+	/** Shell thickness, measured inward from the shape surface. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (EditCondition = "bHollow", ClampMin = 1.0, Units = "cm"))
+	double ShellThickness = 6400.0;
+
 	/** Exponent applied to the normalized closeness for priority (1 = linear, >1 = favors cells near the source more sharply). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = 0.01))
 	double FalloffExponent = 1.0;
@@ -45,6 +62,16 @@ protected:
 		if (!bExpanded) { return 1.0; }
 		const double Scale = FMath::Max(CleanupScale, 1.0);
 		return bInvert ? 1.0 / Scale : Scale;
+	}
+
+	/**
+	 * Mirrored factor for the hollow interior boundary: the cleanup shell must widen on BOTH
+	 * bounds (outer×Scale grows out, inner×(2-Scale) grows in) so neither shell edge flickers.
+	 * Inverted constraints (Scale < 1) shrink both bounds symmetrically for the same reason.
+	 */
+	double GetInnerGateScale(const bool bExpanded) const
+	{
+		return FMath::Max(2.0 - GetGateScale(bExpanded), 0.0);
 	}
 
 	/** Falloff-shaped priority from a normalized closeness, honoring bInvert. */
