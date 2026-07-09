@@ -51,6 +51,27 @@ PCGExScheduling::FChannelMask UPCGExSchedulingSettings::ResolveTags(const TArray
 	return Mask;
 }
 
+void UPCGExSchedulingSettings::GetChannelTable(TArray<TPair<FName, PCGExScheduling::FChannelMask>>& OutChannelTable) const
+{
+	OutChannelTable.Reset();
+	OutChannelTable.Reserve(NameToMask.Num());
+
+	// Preserve the settings-declared order (NameToMask iteration order is unstable).
+	PCGExScheduling::FChannelMask EmittedBits = 0;
+	for (const FPCGExSchedulingChannel& Channel : Channels)
+	{
+		if (const PCGExScheduling::FChannelMask* Found = NameToMask.Find(Channel.Name))
+		{
+			// Skip duplicate-named entries (only the first owns the bit).
+			if ((EmittedBits & *Found) == 0)
+			{
+				EmittedBits |= *Found;
+				OutChannelTable.Emplace(Channel.Name, *Found);
+			}
+		}
+	}
+}
+
 void UPCGExSchedulingSettings::RebuildLookups()
 {
 	NameToMask.Reset();

@@ -78,6 +78,9 @@ public:
 	/** Resolve actor/component tags to a runtime mask via the channel tag lists. Game thread. */
 	PCGExScheduling::FChannelMask ResolveTags(const TArray<FName>& InTags) const;
 
+	/** Settings-ordered (name, single-bit mask) channel table — copied into worker-visible snapshots. Game thread. */
+	void GetChannelTable(TArray<TPair<FName, PCGExScheduling::FChannelMask>>& OutChannelTable) const;
+
 	/** Monotonic revision, bumped whenever channel lookups are rebuilt. Never 0 after initialization. */
 	uint32 GetRevision() const { return Revision; }
 

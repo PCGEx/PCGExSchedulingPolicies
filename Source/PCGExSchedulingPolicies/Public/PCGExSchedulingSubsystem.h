@@ -74,6 +74,42 @@ struct FPCGExTargetSnapshot
 };
 
 /**
+ * Per-frame snapshot of the world's active generation sources (positions + channel masks)
+ * and the channel table, for channel-aware graph nodes executing on worker threads.
+ */
+struct FPCGExActiveSourcesSnapshot
+{
+	struct FSourceState
+	{
+		FVector Position = FVector::ZeroVector;
+		PCGExScheduling::FChannelMask Mask = 0;
+		bool bIsEditorCamera = false;
+	};
+
+	TArray<FSourceState> Sources;
+
+	/** Settings-ordered (name, single-bit mask) channel table, revision-consistent with the source masks. */
+	TArray<TPair<FName, PCGExScheduling::FChannelMask>> ChannelTable;
+
+	PCGExScheduling::FChannelMask ResolveNames(const TArray<FName>& InNames) const
+	{
+		PCGExScheduling::FChannelMask Mask = 0;
+		for (const FName& Name : InNames)
+		{
+			for (const TPair<FName, PCGExScheduling::FChannelMask>& Entry : ChannelTable)
+			{
+				if (Entry.Key == Name)
+				{
+					Mask |= Entry.Value;
+					break;
+				}
+			}
+		}
+		return Mask;
+	}
+};
+
+/**
  * World subsystem backing PCGEx scheduling policies: resolves and caches
  * per-generation-source channel masks.
  *
@@ -126,7 +162,13 @@ public:
 	/** Drops the cached target snapshot for a key so the next resolution rebuilds it (e.g. constraint edited). */
 	void InvalidateTargetCache(const UObject* InKey);
 
+	/** Latest per-frame snapshot of active generation sources. Safe from any thread. Null when the world has no PCG runtime activity. */
+	TSharedPtr<const FPCGExActiveSourcesSnapshot> GetActiveSourcesSnapshot() const;
+
 protected:
+	/** Rebuilt every tick (cheap — a handful of sources). Game thread. */
+	void RebuildActiveSourcesSnapshot();
+
 	/** Uncached resolution ladder. Game thread only. */
 	PCGExScheduling::FChannelMask ResolveMaskInternal(const IPCGGenSourceBase* InGenSource) const;
 
@@ -173,6 +215,9 @@ protected:
 
 	mutable FRWLock TargetCachesLock;
 	TMap<FObjectKey, FTargetCacheEntry> TargetCaches;
+
+	mutable FRWLock ActiveSourcesLock;
+	TSharedPtr<const FPCGExActiveSourcesSnapshot> ActiveSourcesSnapshot;
 
 	/** Last periodic maintenance timestamp (re-resolution + dead key cleanup). */
 	double LastMaintenanceTime = 0.0;

@@ -9,8 +9,10 @@
 #include "PCGCommon.h"
 #include "PCGGraphExecutionStateInterface.h"
 #include "PCGSubsystem.h"
+#include "RuntimeGen/PCGGenSourceManager.h"
 #include "RuntimeGen/GenSources/PCGGenSourceBase.h"
 #include "RuntimeGen/GenSources/PCGGenSourceComponent.h"
+#include "RuntimeGen/GenSources/PCGGenSourceEditorCamera.h"
 #include "RuntimeGen/GenSources/PCGGenSourcePlayer.h"
 
 #include "EngineUtils.h"
@@ -40,16 +42,9 @@ UPCGExSchedulingSubsystem* UPCGExSchedulingSubsystem::GetInstance(const UWorld* 
 
 bool UPCGExSchedulingSubsystem::IsTickable() const
 {
-	{
-		FReadScopeLock ReadLock(SourceMasksLock);
-		if (!SourceMasks.IsEmpty())
-		{
-			return true;
-		}
-	}
-
-	FReadScopeLock ReadLock(TargetCachesLock);
-	return !TargetCaches.IsEmpty();
+	// Always tick: the active-sources snapshot must exist before the first policy or
+	// node ever touches the subsystem. The per-frame body early-outs cheaply.
+	return true;
 }
 
 TStatId UPCGExSchedulingSubsystem::GetStatId() const
@@ -60,6 +55,9 @@ TStatId UPCGExSchedulingSubsystem::GetStatId() const
 void UPCGExSchedulingSubsystem::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	// Per-frame: keep the active-sources snapshot fresh for graph nodes (positions move every frame).
+	RebuildActiveSourcesSnapshot();
 
 	const double Now = FPlatformTime::Seconds();
 	const UPCGExSchedulingSettings* Settings = GetDefault<UPCGExSchedulingSettings>();
@@ -73,6 +71,58 @@ void UPCGExSchedulingSubsystem::Tick(float DeltaSeconds)
 
 	TickSourceMaskMaintenance(Now);
 	TickTargetCacheMaintenance(Now);
+}
+
+void UPCGExSchedulingSubsystem::RebuildActiveSourcesSnapshot()
+{
+	TSharedPtr<const FPCGExActiveSourcesSnapshot> NewSnapshot;
+
+	if (UPCGSubsystem* PCGSubsystem = UPCGSubsystem::GetInstance(GetWorld()))
+	{
+		FPCGGenSourceManager* GenSourceManager = PCGSubsystem->GetGenSourceManager();
+		const APCGWorldActor* PCGWorldActor = PCGSubsystem->GetPCGWorldActor();
+
+		if (GenSourceManager && PCGWorldActor)
+		{
+			TSharedRef<FPCGExActiveSourcesSnapshot> Building = MakeShared<FPCGExActiveSourcesSnapshot>();
+			GetDefault<UPCGExSchedulingSettings>()->GetChannelTable(Building->ChannelTable);
+
+			// Benign wrt the scheduler: sources are ticked at most once per dirty cycle,
+			// whether we or the runtime-gen scheduler consume the dirty flag first.
+			const TSet<IPCGGenSourceBase*> GenSources = GenSourceManager->GetAllGenSources(PCGWorldActor);
+			Building->Sources.Reserve(GenSources.Num());
+
+			for (IPCGGenSourceBase* GenSource : GenSources)
+			{
+				if (!GenSource)
+				{
+					continue;
+				}
+
+				const TOptional<FVector> Position = GenSource->GetPosition();
+				if (!Position.IsSet())
+				{
+					continue;
+				}
+
+				FPCGExActiveSourcesSnapshot::FSourceState& State = Building->Sources.Emplace_GetRef();
+				State.Position = Position.GetValue();
+				State.Mask = ResolveSourceMask(GenSource);
+				State.bIsEditorCamera = Cast<UPCGGenSourceEditorCamera>(GenSource) != nullptr;
+			}
+
+			NewSnapshot = Building;
+		}
+	}
+
+	FWriteScopeLock WriteLock(ActiveSourcesLock);
+	ActiveSourcesSnapshot = MoveTemp(NewSnapshot);
+}
+
+TSharedPtr<const FPCGExActiveSourcesSnapshot> UPCGExSchedulingSubsystem::GetActiveSourcesSnapshot() const
+{
+	FReadScopeLock ReadLock(ActiveSourcesLock);
+	return ActiveSourcesSnapshot;
 }
 
 void UPCGExSchedulingSubsystem::TickSourceMaskMaintenance(const double InNow)
