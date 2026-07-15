@@ -57,6 +57,15 @@ void UPCGExSchedulingSubsystem::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
+	// Skip all world/PCG access once the world starts tearing down (editor close, map change, PIE end):
+	// gen sources are mid-destruction, so GetAllGenSources() hands back dangling pointers. bIsTearingDown
+	// is set before SubsystemCollection.Deinitialize() -- which is the only thing that cancels this tick.
+	const UWorld* World = GetWorld();
+	if (!World || World->bIsTearingDown)
+	{
+		return;
+	}
+
 	// Per-frame: keep the active-sources snapshot fresh for graph nodes (positions move every frame).
 	RebuildActiveSourcesSnapshot();
 
