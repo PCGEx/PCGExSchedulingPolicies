@@ -16,6 +16,10 @@
 #include "RuntimeGen/GenSources/PCGGenSourceEditorCamera.h"
 #include "RuntimeGen/GenSources/PCGGenSourcePlayer.h"
 
+#if WITH_EDITOR
+#include "Editor.h"
+#endif
+
 #include "EngineUtils.h"
 #include "Components/SplineComponent.h"
 #include "Engine/World.h"
@@ -34,6 +38,17 @@ namespace PCGExSchedulingSubsystem
 		// Generation sources are always UObjects (the manager stores TScriptInterface).
 		return Cast<UObject>(const_cast<IPCGGenSourceBase*>(InGenSource));
 	}
+
+#if WITH_EDITOR
+	bool IsViewportClientLive(const FEditorViewportClient* InClient)
+	{
+		// ~FEditorViewportClient unregisters itself from GEditor's client list, making membership
+		// the only reliable liveness signal for the gen source manager's raw pointer (which nothing
+		// nulls on destruction -- it is merely re-resolved whenever the runtime-gen scheduler
+		// dirties the manager).
+		return InClient && GEditor && GEditor->GetAllViewportClients().Contains(InClient);
+	}
+#endif
 }
 
 UPCGExSchedulingSubsystem* UPCGExSchedulingSubsystem::GetInstance(const UWorld* InWorld)
@@ -57,11 +72,12 @@ void UPCGExSchedulingSubsystem::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	// Skip all world/PCG access once the world starts tearing down (editor close, map change, PIE end):
-	// gen sources are mid-destruction, so GetAllGenSources() hands back dangling pointers. bIsTearingDown
-	// is set before SubsystemCollection.Deinitialize() -- which is the only thing that cancels this tick.
+	// Skip all world/PCG access once shutdown begins. bIsTearingDown covers map change and PIE end,
+	// but on editor close the Slate windows (and their FEditorViewportClients) are destroyed in the
+	// same stack that requests engine exit -- BEFORE any world starts tearing down -- so the exit
+	// request is the only flag raised early enough.
 	const UWorld* World = GetWorld();
-	if (!World || World->bIsTearingDown)
+	if (IsEngineExitRequested() || !World || World->bIsTearingDown)
 	{
 		return;
 	}
@@ -122,6 +138,20 @@ void UPCGExSchedulingSubsystem::RebuildActiveSourcesSnapshot()
 				{
 					continue;
 				}
+
+#if WITH_EDITOR
+				// The editor camera source holds a raw FEditorViewportClient* that is refreshed only
+				// when the runtime-gen scheduler dirties the manager. If the client's viewport was
+				// destroyed since (tab closed, editor closing) while the scheduler sat idle, the
+				// pointer dangles and GetPosition()'s virtual dispatch jumps into freed memory.
+				if (const UPCGGenSourceEditorCamera* EditorCamera = Cast<UPCGGenSourceEditorCamera>(GenSource))
+				{
+					if (!PCGExSchedulingSubsystem::IsViewportClientLive(EditorCamera->EditorViewportClient))
+					{
+						continue;
+					}
+				}
+#endif
 
 				const TOptional<FVector> Position = GenSource->GetPosition();
 				if (!Position.IsSet())

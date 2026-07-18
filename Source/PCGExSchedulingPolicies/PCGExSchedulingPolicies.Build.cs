@@ -22,5 +22,12 @@ public class PCGExSchedulingPolicies : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 		});
+
+		if (Target.bBuildEditor)
+		{
+			// GEditor->GetAllViewportClients(): liveness validation of the runtime-gen editor
+			// camera's raw FEditorViewportClient* (see PCGExSchedulingSubsystem.cpp).
+			PrivateDependencyModuleNames.Add("UnrealEd");
+		}
 	}
 }
