@@ -9,7 +9,18 @@
 
 #include "RuntimeGen/GenSources/PCGGenSourceBase.h"
 
+#include "EngineDefines.h"
+
 #include UE_INLINE_GENERATED_CPP_BY_NAME(PCGExSchedulingPolicy)
+
+namespace PCGExSchedulingPolicy
+{
+	/**
+	 * Oldest scan-path sources snapshot the cleanup path still trusts (~2 s at 60 fps, the cadence the
+	 * subsystem's own mask maintenance offers). Older: fall back to the locked subsystem cache.
+	 */
+	constexpr uint64 MaxCachedSourcesAgeFrames = 120;
+}
 
 double UPCGExSchedulingPolicy::CalculatePriority(const IPCGGenSourceBase* InGenSource, const FBox& GenerationBounds, const bool bUse2DGrid) const
 {
@@ -41,7 +52,7 @@ double UPCGExSchedulingPolicy::CalculatePriority(const IPCGGenSourceBase* InGenS
 
 bool UPCGExSchedulingPolicy::ShouldGenerate(const IPCGGenSourceBase* InGenSource, const FBox& GenerationBounds, const bool bUse2DGrid) const
 {
-	if (!PassesSourceFilters(InGenSource))
+	if (!PassesSourceFilters(InGenSource, /*bAllowCache=*/true))
 	{
 		return false;
 	}
@@ -52,7 +63,7 @@ bool UPCGExSchedulingPolicy::ShouldGenerate(const IPCGGenSourceBase* InGenSource
 bool UPCGExSchedulingPolicy::ShouldCull(const IPCGGenSourceBase* InGenSource, const FBox& GenerationBounds, const bool bUse2DGrid) const
 {
 	// Filtered-out sources vote to cull, mirroring the stock policy's network mode pattern.
-	if (!PassesSourceFilters(InGenSource))
+	if (!PassesSourceFilters(InGenSource, /*bAllowCache=*/false))
 	{
 		return true;
 	}
@@ -130,6 +141,7 @@ void UPCGExSchedulingPolicy::PostEditChangeProperty(FPropertyChangedEvent& Prope
 
 	// Force channel mask re-resolution on any edit -- cheap, and covers Channels edits.
 	CachedChannelRevision = 0;
+	CachedFilterSource = nullptr;
 }
 #endif
 
@@ -137,9 +149,44 @@ void UPCGExSchedulingPolicy::SetChannels(const FPCGExChannelSelector& InChannels
 {
 	Channels = InChannels;
 	CachedChannelRevision = 0;
+	CachedFilterSource = nullptr;
 }
 
-bool UPCGExSchedulingPolicy::PassesSourceFilters(const IPCGGenSourceBase* InGenSource) const
+void UPCGExSchedulingPolicy::DebugDraw(const UWorld* InWorld, const TArray<IPCGGenSourceBase*>& InGenSources, const bool bUse2DGrid, const bool bDrawCleanup) const
+{
+#if UE_ENABLE_DEBUG_DRAWING
+	// Only the sources this policy actually reacts to.
+	TArray<const IPCGGenSourceBase*, TInlineAllocator<8>> Sources;
+	for (const IPCGGenSourceBase* GenSource : InGenSources)
+	{
+		if (GenSource && PassesSourceFilters(GenSource, /*bAllowCache=*/false))
+		{
+			Sources.Add(GenSource);
+		}
+	}
+
+	for (const UPCGExSchedulingConstraint* Constraint : Constraints)
+	{
+		if (!Constraint || !Constraint->bEnabled)
+		{
+			continue;
+		}
+
+		if (!Constraint->DebugDrawsPerSource())
+		{
+			Constraint->DebugDraw(InWorld, nullptr, bUse2DGrid, bDrawCleanup);
+			continue;
+		}
+
+		for (const IPCGGenSourceBase* GenSource : Sources)
+		{
+			Constraint->DebugDraw(InWorld, GenSource, bUse2DGrid, bDrawCleanup);
+		}
+	}
+#endif
+}
+
+bool UPCGExSchedulingPolicy::PassesSourceFilters(const IPCGGenSourceBase* InGenSource, const bool bAllowCache) const
 {
 	check(InGenSource);
 
@@ -156,25 +203,66 @@ bool UPCGExSchedulingPolicy::PassesSourceFilters(const IPCGGenSourceBase* InGenS
 		return true;
 	}
 
+	if (bAllowCache && CachedFilterSource == InGenSource && CachedFilterFrame == GFrameCounter)
+	{
+		return bCachedFilterResult;
+	}
+
+	const bool bResult = EvaluateSourceFilter(InGenSource, bAllowCache);
+
+	if (bAllowCache)
+	{
+		CachedFilterSource = InGenSource;
+		CachedFilterFrame = GFrameCounter;
+		bCachedFilterResult = bResult;
+	}
+
+	return bResult;
+}
+
+bool UPCGExSchedulingPolicy::EvaluateSourceFilter(const IPCGGenSourceBase* InGenSource, const bool bAllowCache) const
+{
 	// Camera identity has a single home on the subsystem -- the node snapshot uses the same test.
 	if (bEditorCameraBypassesChannels && UPCGExSchedulingSubsystem::IsEditorCameraSource(InGenSource))
 	{
 		return true;
 	}
 
-	UPCGExSchedulingSubsystem* Subsystem = UPCGExSchedulingSubsystem::GetInstance(GetWorld());
-	if (!Subsystem)
+	TOptional<PCGExScheduling::FChannelMask> SourceMask;
+
+	if (!bAllowCache)
 	{
-		return UnresolvedSources == EPCGExUnresolvedSourceBehavior::Accept;
+		// Cleanup: lock-free lookup in the scan's per-frame snapshot.
+		const FPCGExActiveSourcesSnapshot* Snapshot = CachedSourcesSnapshot.Get();
+		if (Snapshot && GFrameCounter - CachedSourcesFrame <= PCGExSchedulingPolicy::MaxCachedSourcesAgeFrames)
+		{
+			SourceMask = Snapshot->FindMask(InGenSource);
+		}
 	}
 
-	const TOptional<PCGExScheduling::FChannelMask> SourceMask = Subsystem->GetOrResolveSourceMask(InGenSource);
+	if (!SourceMask.IsSet())
+	{
+		UPCGExSchedulingSubsystem* Subsystem = UPCGExSchedulingSubsystem::GetInstance(GetWorld());
+		if (!Subsystem)
+		{
+			return UnresolvedSources == EPCGExUnresolvedSourceBehavior::Accept;
+		}
+
+		if (bAllowCache && CachedSourcesFrame != GFrameCounter)
+		{
+			CachedSourcesSnapshot = Subsystem->GetActiveSourcesSnapshot();
+			CachedSourcesFrame = GFrameCounter;
+		}
+
+		SourceMask = Subsystem->GetOrResolveSourceMask(InGenSource);
+	}
+
 	if (!SourceMask.IsSet() || SourceMask.GetValue() == 0)
 	{
 		return UnresolvedSources == EPCGExUnresolvedSourceBehavior::Accept;
 	}
 
-	return (SourceMask.GetValue() & GetPolicyChannelMask()) != 0;
+	return (SourceMask.GetValue() & GetPolicyChannelMask(bAllowCache)) != 0;
 }
 
 bool UPCGExSchedulingPolicy::EvaluateGates(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid, const bool bExpanded) const
@@ -207,20 +295,24 @@ bool UPCGExSchedulingPolicy::EvaluateGates(const IPCGGenSourceBase* InGenSource,
 	return CombineMode == EPCGExConstraintLogic::All ? true : !bAnyEnabled;
 }
 
-PCGExScheduling::FChannelMask UPCGExSchedulingPolicy::GetPolicyChannelMask() const
+PCGExScheduling::FChannelMask UPCGExSchedulingPolicy::GetPolicyChannelMask(const bool bAllowCache) const
 {
 	const UPCGExSchedulingSettings* Settings = GetDefault<UPCGExSchedulingSettings>();
 	const uint32 Revision = Settings->GetRevision();
 
-	if (IsInGameThread())
+	if (CachedChannelRevision == Revision)
 	{
-		if (CachedChannelRevision != Revision)
-		{
-			CachedChannelMask = Settings->ResolveChannelNames(Channels.Channels);
-			CachedChannelRevision = Revision;
-		}
+		return CachedChannelMask;
 	}
 
-	// Worker threads read the (possibly one-tick stale) cached value -- see member comment.
-	return CachedChannelMask;
+	const PCGExScheduling::FChannelMask Mask = Settings->ResolveChannelNames(Channels.Channels);
+
+	// The cleanup path is concurrent: resolve on the spot, leave the cache to the next scan.
+	if (bAllowCache)
+	{
+		CachedChannelMask = Mask;
+		CachedChannelRevision = Revision;
+	}
+
+	return Mask;
 }

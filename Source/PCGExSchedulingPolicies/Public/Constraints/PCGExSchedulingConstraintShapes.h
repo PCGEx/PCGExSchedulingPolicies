@@ -30,6 +30,36 @@ namespace PCGExSchedulingShapes
 
 	/** Null-safe source position fetch. */
 	PCGEXSCHEDULINGPOLICIES_API TOptional<FVector> GetSourcePosition(const IPCGGenSourceBase* InGenSource);
+
+	/** Per-source inputs of the shape gates, resolved once per (source, frame) on the scan path. */
+	struct PCGEXSCHEDULINGPOLICIES_API FSourceFrame
+	{
+		/** Unset when the source has no position. */
+		TOptional<FVector> Position;
+
+		/** Unit facing; unset without a usable direction. Only resolved when requested. */
+		TOptional<FVector> Direction;
+
+		/** Direction flattened to XY and re-normalized; unset when degenerate (looking straight down). */
+		TOptional<FVector> FlatDirection;
+
+		bool bHasDirectionInfo = false;
+
+		void Resolve(const IPCGGenSourceBase* InGenSource, bool bWithDirection);
+
+		/** Unit XY yaw, unset when degenerate. */
+		TOptional<FVector2D> GetYaw() const
+		{
+			return FlatDirection.IsSet() ? TOptional<FVector2D>(FVector2D(FlatDirection->X, FlatDirection->Y)) : TOptional<FVector2D>();
+		}
+
+		/** Cone axis: full facing on 3D grids, flattened on 2D grids. Zero when unusable. */
+		FVector GetAxis(const bool bUse2DGrid) const
+		{
+			const TOptional<FVector>& Axis = bUse2DGrid ? FlatDirection : Direction;
+			return Axis.IsSet() ? Axis.GetValue() : FVector::ZeroVector;
+		}
+	};
 }
 
 /**
@@ -59,6 +89,13 @@ public:
 	double FalloffExponent = 1.0;
 
 protected:
+	/**
+	 * Source frame for one evaluation. Scan path (bAllowCache): one-entry cache keyed by (source,
+	 * frame) -- the scan loops cells per source within one tick. Cleanup path: resolved into
+	 * OutScratch, no member writes (see the base class threading contract).
+	 */
+	const PCGExSchedulingShapes::FSourceFrame& GetSourceFrame(const IPCGGenSourceBase* InGenSource, bool bWithDirection, bool bAllowCache, PCGExSchedulingShapes::FSourceFrame& OutScratch) const;
+
 	/** Shape scale for a gate evaluation: enlarged for regular cleanup, shrunk for inverted cleanup. */
 	double GetGateScale(const bool bExpanded) const
 	{
@@ -85,6 +122,28 @@ protected:
 		if (bInvert) { Closeness = 1.0 - Closeness; }
 		return FMath::Pow(Closeness, FalloffExponent);
 	}
+
+	/**
+	 * Debug-draw ladder shared by all shapes: the gate variant (unit scales, interior in red), then
+	 * the cleanup variant when asked (gate/inner scales, all orange).
+	 * InDraw(OuterScale, InnerScale, OuterColor, InnerColor).
+	 */
+	template <typename DrawFn>
+	void DebugDrawVariants(const bool bDrawCleanup, DrawFn&& InDraw) const
+	{
+		InDraw(1.0, 1.0, PCGExSchedulingDebug::GateColor(bInvert), PCGExSchedulingDebug::InteriorColor());
+
+		if (bDrawCleanup)
+		{
+			InDraw(GetGateScale(true), GetInnerGateScale(true), PCGExSchedulingDebug::CleanupColor(), PCGExSchedulingDebug::CleanupColor());
+		}
+	}
+
+private:
+	/** Scan-path one-entry source frame cache. Never written on the cleanup path. */
+	mutable PCGExSchedulingShapes::FSourceFrame CachedFrame;
+	mutable const IPCGGenSourceBase* CachedFrameSource = nullptr;
+	mutable uint64 CachedFrameCounter = 0;
 };
 
 /** Cells generate while they intersect a sphere around the generation source. */
@@ -100,6 +159,7 @@ public:
 
 	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const override;
 	virtual TOptional<double> CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid) const override;
+	virtual void DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, bool bUse2DGrid, bool bDrawCleanup) const override;
 };
 
 /** Cells generate while they intersect a world-Z-aligned cylinder around the generation source -- vertical reach is decoupled from horizontal reach. */
@@ -119,6 +179,7 @@ public:
 
 	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const override;
 	virtual TOptional<double> CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid) const override;
+	virtual void DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, bool bUse2DGrid, bool bDrawCleanup) const override;
 };
 
 /** Cells generate while they intersect a box around the generation source, optionally yaw-aligned to its facing direction. */
@@ -139,6 +200,7 @@ public:
 	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const override;
 	virtual TOptional<double> CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid) const override;
 	virtual bool CullsBasedOnDirection() const override { return bAlignToSourceDirection; }
+	virtual void DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, bool bUse2DGrid, bool bDrawCleanup) const override;
 };
 
 /**
@@ -163,14 +225,14 @@ public:
 	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const override;
 	virtual TOptional<double> CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid) const override;
 	virtual bool CullsBasedOnDirection() const override { return true; }
+	virtual void DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, bool bUse2DGrid, bool bDrawCleanup) const override;
 
 protected:
 	/**
-	 * Value-keyed trig cache: recomputed when the angle changes, cached from the game thread
-	 * only. Worker-thread cleanup either reads the cache or recomputes locally -- the
-	 * scheduler's scan-then-cleanup barrier orders the game-thread write before worker reads.
+	 * Value-keyed trig cache. Written only when bAllowCache (scan path and debug draw: game thread,
+	 * no concurrency); the concurrent cleanup path recomputes locally when stale.
 	 */
-	void GetHalfAngleTrig(double& OutCosHalfAngle, double& OutSinHalfAngle) const
+	void GetHalfAngleTrig(double& OutCosHalfAngle, double& OutSinHalfAngle, const bool bAllowCache) const
 	{
 		const double ClampedAngle = FMath::Clamp(HalfAngleDegrees, 1.0, 89.0);
 
@@ -185,7 +247,7 @@ protected:
 		OutCosHalfAngle = FMath::Cos(HalfAngleRadians);
 		OutSinHalfAngle = FMath::Sin(HalfAngleRadians);
 
-		if (IsInGameThread())
+		if (bAllowCache)
 		{
 			CachedCosHalfAngle = OutCosHalfAngle;
 			CachedSinHalfAngle = OutSinHalfAngle;

@@ -7,6 +7,8 @@
 
 #include "RuntimeGen/GenSources/PCGGenSourceBase.h"
 
+#include "DrawDebugHelpers.h"
+#include "EngineDefines.h"
 #include "Math/Box2D.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(PCGExSchedulingConstraintShapes)
@@ -17,28 +19,41 @@ namespace PCGExSchedulingShapes
 	{
 		return InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
 	}
+
+	void FSourceFrame::Resolve(const IPCGGenSourceBase* InGenSource, const bool bWithDirection)
+	{
+		Position = GetSourcePosition(InGenSource);
+		Direction.Reset();
+		FlatDirection.Reset();
+		bHasDirectionInfo = bWithDirection;
+
+		if (!bWithDirection || !InGenSource)
+		{
+			return;
+		}
+
+		const TOptional<FVector> RawDirection = InGenSource->GetDirection();
+		if (!RawDirection.IsSet())
+		{
+			return;
+		}
+
+		FVector Unit = RawDirection.GetValue();
+		if (Unit.Normalize(UE_KINDA_SMALL_NUMBER))
+		{
+			Direction = Unit;
+		}
+
+		FVector Flat(RawDirection->X, RawDirection->Y, 0.0);
+		if (Flat.Normalize(UE_KINDA_SMALL_NUMBER))
+		{
+			FlatDirection = Flat;
+		}
+	}
 }
 
 namespace PCGExSchedulingConstraintShapes
 {
-	/** Source facing flattened to a usable XY yaw direction; unset when degenerate (e.g. looking straight down). */
-	TOptional<FVector2D> GetYawDirection(const IPCGGenSourceBase* InGenSource)
-	{
-		const TOptional<FVector> Direction = InGenSource ? InGenSource->GetDirection() : TOptional<FVector>();
-		if (!Direction.IsSet())
-		{
-			return TOptional<FVector2D>();
-		}
-
-		FVector2D Yaw(Direction.GetValue());
-		if (!Yaw.Normalize(UE_KINDA_SMALL_NUMBER))
-		{
-			return TOptional<FVector2D>();
-		}
-
-		return Yaw;
-	}
-
 	/**
 	 * Separating-axis test between the cell's XY rectangle and a yaw-rotated rectangle
 	 * centered on the source. Axes: world X/Y (cell) + the rotated basis (box).
@@ -140,20 +155,78 @@ namespace PCGExSchedulingConstraintShapes
 
 		return FMath::Square(ExpandedAxialDistance) >= FMath::Square(InCosHalfAngle) * FromExpandedApex.SizeSquared();
 	}
+
+#if UE_ENABLE_DEBUG_DRAWING
+	constexpr int32 DebugSegments = 32;
+	constexpr float DebugThickness = 0.0f;
+
+	void DebugDrawSphere(const UWorld* InWorld, const FVector& InCenter, const double InRadius, const FColor& InColor)
+	{
+		DrawDebugSphere(InWorld, InCenter, static_cast<float>(InRadius), DebugSegments, InColor, /*bPersistentLines=*/false, /*LifeTime=*/0.0f, /*DepthPriority=*/0, DebugThickness);
+	}
+
+	/** Circle in the plane perpendicular to InAxis. */
+	void DebugDrawAxisCircle(const UWorld* InWorld, const FVector& InCenter, const FVector& InAxis, const double InRadius, const FColor& InColor)
+	{
+		FVector AxisY, AxisZ;
+		InAxis.FindBestAxisVectors(AxisY, AxisZ);
+		DrawDebugCircle(InWorld, InCenter, InRadius, DebugSegments, InColor, /*bPersistentLines=*/false, /*LifeTime=*/0.0f, /*DepthPriority=*/0, DebugThickness, AxisY, AxisZ, /*bDrawAxis=*/false);
+	}
+
+	/** Flat-capped cone: rim circle at InRange along the axis plus four apex-to-rim edges. */
+	void DebugDrawCone(const UWorld* InWorld, const FVector& InApex, const FVector& InAxis, const double InRange, const double InTanHalfAngle, const FColor& InColor)
+	{
+		const FVector RimCenter = InApex + InAxis * InRange;
+		const double RimRadius = InRange * InTanHalfAngle;
+
+		FVector AxisY, AxisZ;
+		InAxis.FindBestAxisVectors(AxisY, AxisZ);
+		DrawDebugCircle(InWorld, RimCenter, RimRadius, DebugSegments, InColor, /*bPersistentLines=*/false, /*LifeTime=*/0.0f, /*DepthPriority=*/0, DebugThickness, AxisY, AxisZ, /*bDrawAxis=*/false);
+
+		const FVector RimPoints[4] = {RimCenter + AxisY * RimRadius, RimCenter - AxisY * RimRadius, RimCenter + AxisZ * RimRadius, RimCenter - AxisZ * RimRadius};
+		for (const FVector& RimPoint : RimPoints)
+		{
+			DrawDebugLine(InWorld, InApex, RimPoint, InColor, /*bPersistentLines=*/false, /*LifeTime=*/0.0f, /*DepthPriority=*/0, DebugThickness);
+		}
+	}
+#endif
 }
+
+#pragma region UPCGExSchedulingConstraintShape
+
+const PCGExSchedulingShapes::FSourceFrame& UPCGExSchedulingConstraintShape::GetSourceFrame(const IPCGGenSourceBase* InGenSource, const bool bWithDirection, const bool bAllowCache, PCGExSchedulingShapes::FSourceFrame& OutScratch) const
+{
+	if (!bAllowCache)
+	{
+		OutScratch.Resolve(InGenSource, bWithDirection);
+		return OutScratch;
+	}
+
+	if (CachedFrameSource != InGenSource || CachedFrameCounter != GFrameCounter || (bWithDirection && !CachedFrame.bHasDirectionInfo))
+	{
+		CachedFrame.Resolve(InGenSource, bWithDirection);
+		CachedFrameSource = InGenSource;
+		CachedFrameCounter = GFrameCounter;
+	}
+
+	return CachedFrame;
+}
+
+#pragma endregion
 
 #pragma region UPCGExSchedulingConstraintSphere
 
 bool UPCGExSchedulingConstraintSphere::EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid, const bool bExpanded) const
 {
-	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
-	if (!Position.IsSet())
+	PCGExSchedulingShapes::FSourceFrame Scratch;
+	const PCGExSchedulingShapes::FSourceFrame& Frame = GetSourceFrame(InGenSource, /*bWithDirection=*/false, /*bAllowCache=*/!bExpanded, Scratch);
+	if (!Frame.Position.IsSet())
 	{
 		// No position: never inside the shape.
 		return bInvert;
 	}
 
-	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Position.GetValue(), InBounds, bUse2DGrid);
+	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, bUse2DGrid);
 	const double ScaledRadius = Radius * GetGateScale(bExpanded);
 	bool bInside = InBounds.ComputeSquaredDistanceToPoint(SourcePosition) <= ScaledRadius * ScaledRadius;
 
@@ -172,16 +245,40 @@ bool UPCGExSchedulingConstraintSphere::EvaluateGate(const IPCGGenSourceBase* InG
 
 TOptional<double> UPCGExSchedulingConstraintSphere::CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid) const
 {
-	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
-	if (!Position.IsSet())
+	PCGExSchedulingShapes::FSourceFrame Scratch;
+	const PCGExSchedulingShapes::FSourceFrame& Frame = GetSourceFrame(InGenSource, /*bWithDirection=*/false, /*bAllowCache=*/true, Scratch);
+	if (!Frame.Position.IsSet())
 	{
 		return TOptional<double>();
 	}
 
-	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Position.GetValue(), InBounds, bUse2DGrid);
+	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, bUse2DGrid);
 	const double Distance = FMath::Sqrt(InBounds.ComputeSquaredDistanceToPoint(SourcePosition));
 
 	return ShapedPriority(1.0 - Distance / FMath::Max(Radius, 1.0));
+}
+
+void UPCGExSchedulingConstraintSphere::DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, const bool bUse2DGrid, const bool bDrawCleanup) const
+{
+#if UE_ENABLE_DEBUG_DRAWING
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
+	if (!Position.IsSet())
+	{
+		return;
+	}
+
+	const FVector Center = Position.GetValue();
+	const double InnerRadius = bHollow ? FMath::Max(Radius - ShellThickness, 0.0) : 0.0;
+
+	DebugDrawVariants(bDrawCleanup, [&](const double OuterScale, const double InnerScale, const FColor& OuterColor, const FColor& InnerColor)
+	{
+		PCGExSchedulingConstraintShapes::DebugDrawSphere(InWorld, Center, Radius * OuterScale, OuterColor);
+		if (InnerRadius > 0.0)
+		{
+			PCGExSchedulingConstraintShapes::DebugDrawSphere(InWorld, Center, InnerRadius * InnerScale, InnerColor);
+		}
+	});
+#endif
 }
 
 #pragma endregion
@@ -190,13 +287,14 @@ TOptional<double> UPCGExSchedulingConstraintSphere::CalcPriority(const IPCGGenSo
 
 bool UPCGExSchedulingConstraintCylinder::EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid, const bool bExpanded) const
 {
-	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
-	if (!Position.IsSet())
+	PCGExSchedulingShapes::FSourceFrame Scratch;
+	const PCGExSchedulingShapes::FSourceFrame& Frame = GetSourceFrame(InGenSource, /*bWithDirection=*/false, /*bAllowCache=*/!bExpanded, Scratch);
+	if (!Frame.Position.IsSet())
 	{
 		return bInvert;
 	}
 
-	const FVector SourcePosition = Position.GetValue();
+	const FVector& SourcePosition = Frame.Position.GetValue();
 	const double Scale = GetGateScale(bExpanded);
 
 	const FBox2D BoundsXY(FVector2D(InBounds.Min), FVector2D(InBounds.Max));
@@ -235,17 +333,57 @@ bool UPCGExSchedulingConstraintCylinder::EvaluateGate(const IPCGGenSourceBase* I
 
 TOptional<double> UPCGExSchedulingConstraintCylinder::CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid) const
 {
-	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
-	if (!Position.IsSet())
+	PCGExSchedulingShapes::FSourceFrame Scratch;
+	const PCGExSchedulingShapes::FSourceFrame& Frame = GetSourceFrame(InGenSource, /*bWithDirection=*/false, /*bAllowCache=*/true, Scratch);
+	if (!Frame.Position.IsSet())
 	{
 		return TOptional<double>();
 	}
 
 	// Radial closeness only -- vertical position doesn't affect ordering.
 	const FBox2D BoundsXY(FVector2D(InBounds.Min), FVector2D(InBounds.Max));
-	const double RadialDistance = FMath::Sqrt(BoundsXY.ComputeSquaredDistanceToPoint(FVector2D(Position.GetValue())));
+	const double RadialDistance = FMath::Sqrt(BoundsXY.ComputeSquaredDistanceToPoint(FVector2D(Frame.Position.GetValue())));
 
 	return ShapedPriority(1.0 - RadialDistance / FMath::Max(Radius, 1.0));
+}
+
+void UPCGExSchedulingConstraintCylinder::DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, const bool bUse2DGrid, const bool bDrawCleanup) const
+{
+#if UE_ENABLE_DEBUG_DRAWING
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
+	if (!Position.IsSet())
+	{
+		return;
+	}
+
+	const FVector Center = Position.GetValue();
+
+	// 2D grids ignore the height: a flat circle is the honest picture.
+	auto DrawCylinder = [&](const double InRadius, const double InHalfHeight, const FColor& InColor)
+	{
+		if (bUse2DGrid)
+		{
+			PCGExSchedulingConstraintShapes::DebugDrawAxisCircle(InWorld, Center, FVector::UpVector, InRadius, InColor);
+		}
+		else
+		{
+			DrawDebugCylinder(InWorld, Center - FVector::UpVector * InHalfHeight, Center + FVector::UpVector * InHalfHeight, static_cast<float>(InRadius), PCGExSchedulingConstraintShapes::DebugSegments, InColor, /*bPersistentLines=*/false, /*LifeTime=*/0.0f, /*DepthPriority=*/0, PCGExSchedulingConstraintShapes::DebugThickness);
+		}
+	};
+
+	const double InnerRadius = bHollow ? FMath::Max(Radius - ShellThickness, 0.0) : 0.0;
+	const double InnerHalfHeight = bHollow ? FMath::Max(HalfHeight - ShellThickness, 0.0) : 0.0;
+	const bool bHasInterior = InnerRadius > 0.0 && (bUse2DGrid || InnerHalfHeight > 0.0);
+
+	DebugDrawVariants(bDrawCleanup, [&](const double OuterScale, const double InnerScale, const FColor& OuterColor, const FColor& InnerColor)
+	{
+		DrawCylinder(Radius * OuterScale, HalfHeight * OuterScale, OuterColor);
+		if (bHasInterior)
+		{
+			DrawCylinder(InnerRadius * InnerScale, InnerHalfHeight * InnerScale, InnerColor);
+		}
+	});
+#endif
 }
 
 #pragma endregion
@@ -254,20 +392,16 @@ TOptional<double> UPCGExSchedulingConstraintCylinder::CalcPriority(const IPCGGen
 
 bool UPCGExSchedulingConstraintBox::EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid, const bool bExpanded) const
 {
-	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
-	if (!Position.IsSet())
+	PCGExSchedulingShapes::FSourceFrame Scratch;
+	const PCGExSchedulingShapes::FSourceFrame& Frame = GetSourceFrame(InGenSource, /*bWithDirection=*/bAlignToSourceDirection, /*bAllowCache=*/!bExpanded, Scratch);
+	if (!Frame.Position.IsSet())
 	{
 		return bInvert;
 	}
 
-	const FVector SourcePosition = Position.GetValue();
+	const FVector& SourcePosition = Frame.Position.GetValue();
 	const FVector ScaledExtents = Extents * GetGateScale(bExpanded);
-
-	TOptional<FVector2D> YawDirection;
-	if (bAlignToSourceDirection)
-	{
-		YawDirection = PCGExSchedulingConstraintShapes::GetYawDirection(InGenSource);
-	}
+	const TOptional<FVector2D> YawDirection = bAlignToSourceDirection ? Frame.GetYaw() : TOptional<FVector2D>();
 
 	bool bInside;
 
@@ -333,19 +467,20 @@ bool UPCGExSchedulingConstraintBox::EvaluateGate(const IPCGGenSourceBase* InGenS
 
 TOptional<double> UPCGExSchedulingConstraintBox::CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid) const
 {
-	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
-	if (!Position.IsSet())
+	PCGExSchedulingShapes::FSourceFrame Scratch;
+	const PCGExSchedulingShapes::FSourceFrame& Frame = GetSourceFrame(InGenSource, /*bWithDirection=*/bAlignToSourceDirection, /*bAllowCache=*/true, Scratch);
+	if (!Frame.Position.IsSet())
 	{
 		return TOptional<double>();
 	}
 
-	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Position.GetValue(), InBounds, bUse2DGrid);
+	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, bUse2DGrid);
 	FVector Delta = InBounds.GetClosestPointTo(SourcePosition) - SourcePosition;
 
 	// Express the offset in the box frame when yaw-aligned so closeness follows the shape.
 	if (bAlignToSourceDirection)
 	{
-		if (const TOptional<FVector2D> YawDirection = PCGExSchedulingConstraintShapes::GetYawDirection(InGenSource); YawDirection.IsSet())
+		if (const TOptional<FVector2D> YawDirection = Frame.GetYaw(); YawDirection.IsSet())
 		{
 			const FVector2D Forward = YawDirection.GetValue();
 			const FVector2D Right(-Forward.Y, Forward.X);
@@ -364,14 +499,55 @@ TOptional<double> UPCGExSchedulingConstraintBox::CalcPriority(const IPCGGenSourc
 	return ShapedPriority(1.0 - MaxAxisRatio);
 }
 
+void UPCGExSchedulingConstraintBox::DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, const bool bUse2DGrid, const bool bDrawCleanup) const
+{
+#if UE_ENABLE_DEBUG_DRAWING
+	PCGExSchedulingShapes::FSourceFrame Scratch;
+	const PCGExSchedulingShapes::FSourceFrame& Frame = GetSourceFrame(InGenSource, /*bWithDirection=*/bAlignToSourceDirection, /*bAllowCache=*/true, Scratch);
+	if (!Frame.Position.IsSet())
+	{
+		return;
+	}
+
+	const FVector Center = Frame.Position.GetValue();
+
+	FQuat Rotation = FQuat::Identity;
+	if (bAlignToSourceDirection && Frame.FlatDirection.IsSet())
+	{
+		Rotation = Frame.FlatDirection->ToOrientationQuat();
+	}
+
+	auto DrawBox = [&](FVector InExtents, const FColor& InColor)
+	{
+		if (bUse2DGrid) { InExtents.Z = 0.0; }
+		DrawDebugBox(InWorld, Center, InExtents, Rotation, InColor, /*bPersistentLines=*/false, /*LifeTime=*/0.0f, /*DepthPriority=*/0, PCGExSchedulingConstraintShapes::DebugThickness);
+	};
+
+	const FVector InnerExtents = bHollow
+		                             ? FVector(FMath::Max(Extents.X - ShellThickness, 0.0), FMath::Max(Extents.Y - ShellThickness, 0.0), FMath::Max(Extents.Z - ShellThickness, 0.0))
+		                             : FVector::ZeroVector;
+	const bool bHasInterior = InnerExtents.X > 0.0 && InnerExtents.Y > 0.0 && (bUse2DGrid || InnerExtents.Z > 0.0);
+
+	DebugDrawVariants(bDrawCleanup, [&](const double OuterScale, const double InnerScale, const FColor& OuterColor, const FColor& InnerColor)
+	{
+		DrawBox(Extents * OuterScale, OuterColor);
+		if (bHasInterior)
+		{
+			DrawBox(InnerExtents * InnerScale, InnerColor);
+		}
+	});
+#endif
+}
+
 #pragma endregion
 
 #pragma region UPCGExSchedulingConstraintCone
 
 bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid, const bool bExpanded) const
 {
-	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
-	if (!Position.IsSet())
+	PCGExSchedulingShapes::FSourceFrame Scratch;
+	const PCGExSchedulingShapes::FSourceFrame& Frame = GetSourceFrame(InGenSource, /*bWithDirection=*/true, /*bAllowCache=*/!bExpanded, Scratch);
+	if (!Frame.Position.IsSet())
 	{
 		return bInvert;
 	}
@@ -379,23 +555,8 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 	const double Scale = GetGateScale(bExpanded);
 	const double ScaledRange = Range * Scale;
 
-	FVector Apex = Position.GetValue();
-	FVector Axis = FVector::ZeroVector;
-
-	const TOptional<FVector> Direction = InGenSource->GetDirection();
-	if (Direction.IsSet())
-	{
-		Axis = Direction.GetValue();
-		if (bUse2DGrid)
-		{
-			Axis.Z = 0.0;
-		}
-
-		if (!Axis.Normalize(UE_KINDA_SMALL_NUMBER))
-		{
-			Axis = FVector::ZeroVector;
-		}
-	}
+	FVector Apex = Frame.Position.GetValue();
+	const FVector Axis = Frame.GetAxis(bUse2DGrid);
 
 	if (bUse2DGrid)
 	{
@@ -431,7 +592,7 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 
 		double CosHalfAngle = 0.0;
 		double SinHalfAngle = 1.0;
-		GetHalfAngleTrig(CosHalfAngle, SinHalfAngle);
+		GetHalfAngleTrig(CosHalfAngle, SinHalfAngle, /*bAllowCache=*/!bExpanded);
 
 		const double SphereRadius = SphereExtents.Size();
 
@@ -465,17 +626,67 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 
 TOptional<double> UPCGExSchedulingConstraintCone::CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid) const
 {
-	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
-	if (!Position.IsSet())
+	PCGExSchedulingShapes::FSourceFrame Scratch;
+	const PCGExSchedulingShapes::FSourceFrame& Frame = GetSourceFrame(InGenSource, /*bWithDirection=*/false, /*bAllowCache=*/true, Scratch);
+	if (!Frame.Position.IsSet())
 	{
 		return TOptional<double>();
 	}
 
 	// Radial closeness within Range; pair with a Direction Alignment constraint for angular priority.
-	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Position.GetValue(), InBounds, bUse2DGrid);
+	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, bUse2DGrid);
 	const double Distance = FMath::Sqrt(InBounds.ComputeSquaredDistanceToPoint(SourcePosition));
 
 	return ShapedPriority(1.0 - Distance / FMath::Max(Range, 1.0));
+}
+
+void UPCGExSchedulingConstraintCone::DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, const bool bUse2DGrid, const bool bDrawCleanup) const
+{
+#if UE_ENABLE_DEBUG_DRAWING
+	PCGExSchedulingShapes::FSourceFrame Scratch;
+	const PCGExSchedulingShapes::FSourceFrame& Frame = GetSourceFrame(InGenSource, /*bWithDirection=*/true, /*bAllowCache=*/true, Scratch);
+	if (!Frame.Position.IsSet())
+	{
+		return;
+	}
+
+	const FVector Apex = Frame.Position.GetValue();
+	const FVector Axis = Frame.GetAxis(bUse2DGrid);
+
+	if (Axis.IsZero())
+	{
+		// Same fallback as the gate: a sphere of Range.
+		const double InnerRadius = bHollow ? FMath::Max(Range - ShellThickness, 0.0) : 0.0;
+
+		DebugDrawVariants(bDrawCleanup, [&](const double OuterScale, const double InnerScale, const FColor& OuterColor, const FColor& InnerColor)
+		{
+			PCGExSchedulingConstraintShapes::DebugDrawSphere(InWorld, Apex, Range * OuterScale, OuterColor);
+			if (InnerRadius > 0.0)
+			{
+				PCGExSchedulingConstraintShapes::DebugDrawSphere(InWorld, Apex, InnerRadius * InnerScale, InnerColor);
+			}
+		});
+		return;
+	}
+
+	double CosHalfAngle = 0.0;
+	double SinHalfAngle = 1.0;
+	GetHalfAngleTrig(CosHalfAngle, SinHalfAngle, /*bAllowCache=*/true);
+	const double TanHalfAngle = SinHalfAngle / CosHalfAngle;
+
+	// Inner cone mirrors the gate's erosion: apex shifted forward by T/sin(θ), far cap pulled in.
+	const double ApexShift = ShellThickness / SinHalfAngle;
+	const double InnerRange = bHollow ? FMath::Max(Range - ShellThickness - ApexShift, 0.0) : 0.0;
+
+	DebugDrawVariants(bDrawCleanup, [&](const double OuterScale, const double InnerScale, const FColor& OuterColor, const FColor& InnerColor)
+	{
+		PCGExSchedulingConstraintShapes::DebugDrawCone(InWorld, Apex, Axis, Range * OuterScale, TanHalfAngle, OuterColor);
+		if (InnerRange > 0.0)
+		{
+			PCGExSchedulingConstraintShapes::DebugDrawCone(InWorld, Apex + Axis * (ApexShift * InnerScale), Axis, InnerRange * InnerScale, TanHalfAngle, InnerColor);
+		}
+	});
+#endif
 }
 
 #pragma endregion

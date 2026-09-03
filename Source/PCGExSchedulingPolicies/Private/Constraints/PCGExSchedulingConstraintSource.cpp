@@ -7,6 +7,8 @@
 #include "RuntimeGen/GenSources/PCGGenSourceBase.h"
 
 #include "ConvexVolume.h"
+#include "DrawDebugHelpers.h"
+#include "EngineDefines.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(PCGExSchedulingConstraintSource)
 
@@ -42,6 +44,24 @@ TOptional<double> UPCGExSchedulingConstraintDirectionAlignment::CalcPriority(con
 	return Alignment;
 }
 
+void UPCGExSchedulingConstraintDirectionAlignment::DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, const bool bUse2DGrid, const bool bDrawCleanup) const
+{
+#if UE_ENABLE_DEBUG_DRAWING
+	const TOptional<FVector> Position = PCGExSchedulingShapes::GetSourcePosition(InGenSource);
+	const TOptional<FVector> Direction = InGenSource ? InGenSource->GetDirection() : TOptional<FVector>();
+
+	if (!Position.IsSet() || !Direction.IsSet())
+	{
+		return;
+	}
+
+	// Inverted favors cells behind the source -- point the arrow that way.
+	constexpr double ArrowLength = 1000.0;
+	const FVector Favored = bInvert ? -Direction.GetValue() : Direction.GetValue();
+	DrawDebugDirectionalArrow(InWorld, Position.GetValue(), Position.GetValue() + Favored * ArrowLength, 200.0f, PCGExSchedulingDebug::GateColor(bInvert), /*bPersistentLines=*/false, /*LifeTime=*/0.0f, /*DepthPriority=*/0, /*Thickness=*/2.0f);
+#endif
+}
+
 #pragma endregion
 
 #pragma region UPCGExSchedulingConstraintViewFrustum
@@ -74,6 +94,69 @@ bool UPCGExSchedulingConstraintViewFrustum::EvaluateGate(const IPCGGenSourceBase
 	const bool bInside = ViewFrustum.GetValue().IntersectBox(Center, Extents * Modifier);
 
 	return bInside != bInvert;
+}
+
+void UPCGExSchedulingConstraintViewFrustum::DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, const bool bUse2DGrid, const bool bDrawCleanup) const
+{
+#if UE_ENABLE_DEBUG_DRAWING
+	const TOptional<FConvexVolume> ViewFrustum = InGenSource ? InGenSource->GetViewFrustum(bUse2DGrid) : TOptional<FConvexVolume>();
+	if (!ViewFrustum.IsSet())
+	{
+		return;
+	}
+
+	// Engine sources build their frustum with GetViewFrustumBounds(near + far): plane order is
+	// near, left, right, top, bottom, far. Anything else (a failed near plane) is not drawable.
+	const FConvexVolume::FPlaneArray& Planes = ViewFrustum.GetValue().Planes;
+	if (Planes.Num() != 6)
+	{
+		return;
+	}
+
+	// Corners[Depth][Side][Vertical]: Depth 0 = near / 1 = far, Side 0 = left / 1 = right, Vertical 0 = top / 1 = bottom.
+	FVector Corners[2][2][2];
+	const int32 DepthPlanes[2] = {0, 5};
+	const int32 SidePlanes[2] = {1, 2};
+	const int32 VerticalPlanes[2] = {3, 4};
+
+	for (int32 Depth = 0; Depth < 2; ++Depth)
+	{
+		for (int32 Side = 0; Side < 2; ++Side)
+		{
+			for (int32 Vertical = 0; Vertical < 2; ++Vertical)
+			{
+				if (!FMath::IntersectPlanes3(Corners[Depth][Side][Vertical], Planes[DepthPlanes[Depth]], Planes[SidePlanes[Side]], Planes[VerticalPlanes[Vertical]]))
+				{
+					return;
+				}
+			}
+		}
+	}
+
+	const FColor Color = PCGExSchedulingDebug::GateColor(bInvert);
+	auto DrawEdge = [&](const FVector& InFrom, const FVector& InTo)
+	{
+		DrawDebugLine(InWorld, InFrom, InTo, Color, /*bPersistentLines=*/false, /*LifeTime=*/0.0f, /*DepthPriority=*/0, /*Thickness=*/0.0f);
+	};
+
+	for (int32 Depth = 0; Depth < 2; ++Depth)
+	{
+		// Near and far rectangles.
+		DrawEdge(Corners[Depth][0][0], Corners[Depth][1][0]);
+		DrawEdge(Corners[Depth][1][0], Corners[Depth][1][1]);
+		DrawEdge(Corners[Depth][1][1], Corners[Depth][0][1]);
+		DrawEdge(Corners[Depth][0][1], Corners[Depth][0][0]);
+	}
+
+	for (int32 Side = 0; Side < 2; ++Side)
+	{
+		for (int32 Vertical = 0; Vertical < 2; ++Vertical)
+		{
+			// Near-to-far edges.
+			DrawEdge(Corners[0][Side][Vertical], Corners[1][Side][Vertical]);
+		}
+	}
+#endif
 }
 
 #pragma endregion

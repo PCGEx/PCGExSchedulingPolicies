@@ -13,11 +13,15 @@ A composable replacement for the stock Distance & Direction policy -- pick it in
 
 - **Shapes** -- Sphere, Cylinder, Box (yaw-alignable), Cone; solid or **hollow** (surface shell with configurable thickness).
 - **Source signals** -- Direction Alignment (priority), View Frustum (stock frustum culling parity).
-- **World targets** -- Actor Bounds, Volumes (optional precise brush test), Splines (corridor radius, optional **closed-spline interior fill**); discovered via explicit references and/or actor-tag queries, with automatic rescans when targets move.
+- **World targets** -- Actor Bounds, Volumes (optional precise brush test), Splines (corridor radius, optional **closed-spline interior fill**); discovered via explicit references and/or actor-tag queries. Target regions are resolved once and shared between constraints with identical settings; moving targets rebuild them and, by default, rescan the owning component (`Refresh On Target Change` -- turn it off for targets that move often).
 - `All`/`Any` combination, per-constraint invert and priority weight, cleanup hysteresis everywhere -- no boundary flicker.
 - Blueprint-subclassable policy and constraints for reusable presets.
 
 Constraints refine scheduling *within* the component/graph generation radii -- the engine broadphase always applies.
+
+### Debugging
+
+`pcgex.Scheduling.DebugDraw 1` draws every constraint of every runtime-generated component: shapes around the generation sources they react to (green; cyan when inverted; red hollow interiors), target regions and spline polylines, view frustums and direction arrows. `2` adds the cleanup (hysteresis) variants in orange. Pair it with the engine's `pcg.GraphExecution.DebugDrawGeneratedCells` to see the generation radii and generated cells.
 
 ## Channels
 
@@ -40,9 +44,7 @@ All three are cache-exempt (results depend on live world state) and fall back gr
 
 ## Roadmap
 
-- Constraint debug draw
 - More shapes (torus, …)
 - Spline-emitting virtual generation sources
 - Opt-in graph retrigger when the active channel set changes
 - Blueprint-overridable constraint hooks
-- Shared target snapshots across identical constraint specs

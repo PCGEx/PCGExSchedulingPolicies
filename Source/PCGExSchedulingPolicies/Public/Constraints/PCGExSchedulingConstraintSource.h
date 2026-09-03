@@ -25,6 +25,7 @@ public:
 	// Mirrors the stock policy: direction-based *priority* alone does not force
 	// rescans on rotation -- only direction-based culling does (see View Frustum).
 	virtual bool CullsBasedOnDirection() const override { return false; }
+	virtual void DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, bool bUse2DGrid, bool bDrawCleanup) const override;
 };
 
 /**
@@ -48,4 +49,5 @@ public:
 
 	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const override;
 	virtual bool CullsBasedOnDirection() const override { return true; }
+	virtual void DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, bool bUse2DGrid, bool bDrawCleanup) const override;
 };

@@ -5,21 +5,14 @@
 
 #include "PCGExSchedulingCommon.h"
 
+#include "DrawDebugHelpers.h"
+#include "EngineDefines.h"
 #include "GameFramework/Volume.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(PCGExSchedulingConstraintTargets)
 
 namespace PCGExSchedulingConstraintTargets
 {
-	/** Region bounds expanded by a flat amount, then scaled about their center (hysteresis). */
-	FBox ScaledRegion(const FBox& InRegion, const double InExpansion, const double InScale)
-	{
-		const FBox Expanded = InRegion.ExpandBy(InExpansion);
-		const FVector Center = Expanded.GetCenter();
-		const FVector Extents = Expanded.GetExtent() * InScale;
-		return FBox(Center - Extents, Center + Extents);
-	}
-
 	bool BoxOverlap(const FBox& InRegion, const FBox& InCell, const bool bUse2DGrid)
 	{
 		if (!PCGExScheduling::IntervalsOverlap(InRegion.Min.X, InRegion.Max.X, InCell.Min.X, InCell.Max.X)
@@ -44,33 +37,41 @@ namespace PCGExSchedulingConstraintTargets
 		return FMath::Sqrt(GapX * GapX + GapY * GapY);
 	}
 
-	/** Min distance from the cell center to the shape's polyline (2D-flattened when asked). */
-	double PolylineDistance(const FPCGExTargetShape& InShape, const FBox& InCell, const bool bUse2DGrid)
+	/**
+	 * Min squared distance from a point to the shape's polyline (XY only on 2D grids). Stops at the
+	 * first segment at or below InStopBelowSquared -- pass 0 for the exact minimum.
+	 */
+	double PolylineDistanceSquared(const FPCGExTargetShape& InShape, const FVector& InPoint, const bool bUse2DGrid, const double InStopBelowSquared)
 	{
-		FVector Center = InCell.GetCenter();
-		if (bUse2DGrid) { Center.Z = 0.0; }
-
-		const int32 NumPoints = InShape.SplinePoints.Num();
-		const int32 NumSegments = InShape.bClosedSpline ? NumPoints : NumPoints - 1;
+		const TArray<FVector>& Points = InShape.SplinePoints;
+		const int32 NumSegments = InShape.NumSegments();
 
 		double BestDistanceSquared = TNumericLimits<double>::Max();
 
-		for (int32 Index = 0; Index < NumSegments; ++Index)
+		if (bUse2DGrid)
 		{
-			FVector SegmentStart = InShape.SplinePoints[Index];
-			FVector SegmentEnd = InShape.SplinePoints[(Index + 1) % NumPoints];
+			const FVector2D Point(InPoint);
 
-			if (bUse2DGrid)
+			for (int32 Index = 0; Index < NumSegments; ++Index)
 			{
-				SegmentStart.Z = 0.0;
-				SegmentEnd.Z = 0.0;
-			}
+				const FVector2D ClosestPoint = FMath::ClosestPointOnSegment2D(Point, FVector2D(Points[Index]), FVector2D(Points[InShape.NextPointIndex(Index)]));
+				BestDistanceSquared = FMath::Min(BestDistanceSquared, FVector2D::DistSquared(Point, ClosestPoint));
 
-			const FVector ClosestPoint = FMath::ClosestPointOnSegment(Center, SegmentStart, SegmentEnd);
-			BestDistanceSquared = FMath::Min(BestDistanceSquared, FVector::DistSquared(Center, ClosestPoint));
+				if (BestDistanceSquared <= InStopBelowSquared) { break; }
+			}
+		}
+		else
+		{
+			for (int32 Index = 0; Index < NumSegments; ++Index)
+			{
+				const FVector ClosestPoint = FMath::ClosestPointOnSegment(InPoint, Points[Index], Points[InShape.NextPointIndex(Index)]);
+				BestDistanceSquared = FMath::Min(BestDistanceSquared, FVector::DistSquared(InPoint, ClosestPoint));
+
+				if (BestDistanceSquared <= InStopBelowSquared) { break; }
+			}
 		}
 
-		return NumSegments > 0 ? FMath::Sqrt(BestDistanceSquared) : TNumericLimits<double>::Max();
+		return BestDistanceSquared;
 	}
 
 	/** Conservative cell circumradius (2D-flattened when asked). */
@@ -121,6 +122,13 @@ namespace PCGExSchedulingConstraintTargets
 
 		return PointInPolygonXY(InCellCenter, InShape.SplinePoints);
 	}
+
+#if UE_ENABLE_DEBUG_DRAWING
+	void DrawRegion(const UWorld* InWorld, const FBox& InRegion, const FColor& InColor)
+	{
+		DrawDebugBox(InWorld, InRegion.GetCenter(), InRegion.GetExtent(), InColor, /*bPersistentLines=*/false, /*LifeTime=*/0.0f, /*DepthPriority=*/0, /*Thickness=*/0.0f);
+	}
+#endif
 }
 
 #pragma region UPCGExSchedulingConstraintTargetsBase
@@ -128,21 +136,24 @@ namespace PCGExSchedulingConstraintTargets
 bool UPCGExSchedulingConstraintTargetsBase::EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, const bool bUse2DGrid, const bool bExpanded) const
 {
 	// Purely world-region driven -- the generation source only matters through the engine's radius broadphase.
-	const TSharedPtr<const FPCGExTargetSnapshot> Snapshot = GetTargetSnapshot();
+	// Cleanup (bExpanded) is concurrent and read-only; the scan refreshes.
+	const FPCGExTargetSnapshot* Snapshot = bExpanded ? GetCachedSnapshot() : RefreshTargetSnapshot();
 
 	bool bInside = false;
 
 	if (Snapshot)
 	{
+		const TArray<FPCGExTargetRegion>& Regions = GetCachedRegions();
+		checkSlow(Regions.Num() == Snapshot->Shapes.Num());
+
 		FPCGExTargetTestContext Context;
-		Context.Scale = GetRegionScale(bExpanded);
 		Context.bExpanded = bExpanded;
 		Context.bUse2DGrid = bUse2DGrid;
 		Context.bGameThread = IsInGameThread();
 
-		for (const FPCGExTargetShape& Shape : Snapshot->Shapes)
+		for (int32 Index = 0; Index < Snapshot->Shapes.Num(); ++Index)
 		{
-			if (TestShape(Shape, InBounds, Context))
+			if (TestShape(Snapshot->Shapes[Index], Regions[Index].Get(bExpanded), InBounds, Context))
 			{
 				bInside = true;
 				break;
@@ -160,16 +171,18 @@ TOptional<double> UPCGExSchedulingConstraintTargetsBase::CalcPriority(const IPCG
 		return TOptional<double>();
 	}
 
-	const TSharedPtr<const FPCGExTargetSnapshot> Snapshot = GetTargetSnapshot();
+	const FPCGExTargetSnapshot* Snapshot = RefreshTargetSnapshot();
 	if (!Snapshot || Snapshot->Shapes.IsEmpty())
 	{
 		return TOptional<double>();
 	}
 
+	const TArray<FPCGExTargetRegion>& Regions = GetCachedRegions();
+
 	double MinDistance = TNumericLimits<double>::Max();
-	for (const FPCGExTargetShape& Shape : Snapshot->Shapes)
+	for (int32 Index = 0; Index < Snapshot->Shapes.Num(); ++Index)
 	{
-		MinDistance = FMath::Min(MinDistance, DistanceToShape(Shape, InBounds, bUse2DGrid));
+		MinDistance = FMath::Min(MinDistance, DistanceToShape(Snapshot->Shapes[Index], Regions[Index].Generate, InBounds, bUse2DGrid));
 	}
 
 	double Closeness = 1.0 - FMath::Clamp(MinDistance / PriorityFalloffDistance, 0.0, 1.0);
@@ -181,9 +194,41 @@ TOptional<double> UPCGExSchedulingConstraintTargetsBase::CalcPriority(const IPCG
 	return FMath::Pow(Closeness, FalloffExponent);
 }
 
-double UPCGExSchedulingConstraintTargetsBase::DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const bool bUse2DGrid) const
+void UPCGExSchedulingConstraintTargetsBase::DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, const bool bUse2DGrid, const bool bDrawCleanup) const
 {
-	return PCGExSchedulingConstraintTargets::BoxToBoxDistance(InShape.Bounds.ExpandBy(GetBoundsExpansion()), InBounds, bUse2DGrid);
+#if UE_ENABLE_DEBUG_DRAWING
+	const FPCGExTargetSnapshot* Snapshot = RefreshTargetSnapshot();
+	if (!Snapshot)
+	{
+		return;
+	}
+
+	const TArray<FPCGExTargetRegion>& Regions = GetCachedRegions();
+	const FColor GateColor = PCGExSchedulingDebug::GateColor(bInvert);
+
+	for (int32 Index = 0; Index < Snapshot->Shapes.Num(); ++Index)
+	{
+		const FPCGExTargetShape& Shape = Snapshot->Shapes[Index];
+
+		PCGExSchedulingConstraintTargets::DrawRegion(InWorld, Regions[Index].Generate, GateColor);
+
+		if (bDrawCleanup)
+		{
+			PCGExSchedulingConstraintTargets::DrawRegion(InWorld, Regions[Index].Cleanup, PCGExSchedulingDebug::CleanupColor());
+		}
+
+		const int32 NumSegments = Shape.NumSegments();
+		for (int32 SegmentIndex = 0; SegmentIndex < NumSegments; ++SegmentIndex)
+		{
+			DrawDebugLine(InWorld, Shape.SplinePoints[SegmentIndex], Shape.SplinePoints[Shape.NextPointIndex(SegmentIndex)], GateColor, /*bPersistentLines=*/false, /*LifeTime=*/0.0f, /*DepthPriority=*/0, /*Thickness=*/2.0f);
+		}
+	}
+#endif
+}
+
+double UPCGExSchedulingConstraintTargetsBase::DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InGenerateRegion, const FBox& InBounds, const bool bUse2DGrid) const
+{
+	return PCGExSchedulingConstraintTargets::BoxToBoxDistance(InGenerateRegion, InBounds, bUse2DGrid);
 }
 
 #if WITH_EDITOR
@@ -191,13 +236,8 @@ void UPCGExSchedulingConstraintTargetsBase::PostEditChangeProperty(FPropertyChan
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
-	if (UPCGExSchedulingSubsystem* Subsystem = UPCGExSchedulingSubsystem::GetInstance(GetWorld()))
-	{
-		Subsystem->InvalidateTargetCache(this);
-	}
-
-	// The invalidation dropped the cache entry (consumer set included) -- re-register on next resolve.
-	bConsumerRegistered = false;
+	// The query (and so the cache key) may have changed -- re-acquire on the next scan.
+	ReleaseTargetSlot();
 }
 #endif
 
@@ -220,34 +260,90 @@ FPCGExTargetQuery UPCGExSchedulingConstraintTargetsBase::BuildTargetQuery() cons
 	Query.SplineErrorTolerance = GetSplineErrorTolerance();
 	Query.bTrackMovement = bTrackTargetMovement;
 	Query.MovementTolerance = MovementTolerance;
+	Query.TrackingInterval = TrackingInterval;
+	Query.bRefreshConsumers = bRefreshOnTargetChange;
 
 	return Query;
 }
 
-TSharedPtr<const FPCGExTargetSnapshot> UPCGExSchedulingConstraintTargetsBase::GetTargetSnapshot() const
+const FPCGExTargetSnapshot* UPCGExSchedulingConstraintTargetsBase::RefreshTargetSnapshot() const
 {
-	UPCGExSchedulingSubsystem* Subsystem = UPCGExSchedulingSubsystem::GetInstance(GetWorld());
-	if (!Subsystem)
+	check(IsInGameThread());
+
+	// The subsystem that issued the slot is gone (world torn down, entry released) -- start over.
+	if (CachedSlot && CachedSlot->bOrphaned)
 	{
-		return nullptr;
+		CachedSlot.Reset();
 	}
 
-	if (IsInGameThread())
+	if (!CachedSlot)
 	{
-		// Register as a consumer once per instance -- afterwards the per-cell resolve
-		// fast path skips the outer-chain walk and the consumer-set lookup entirely.
-		const UObject* Consumer = bConsumerRegistered ? nullptr : static_cast<const UObject*>(this);
-		TSharedPtr<const FPCGExTargetSnapshot> Snapshot = Subsystem->ResolveTargetSnapshot(this, [this] { return BuildTargetQuery(); }, Consumer);
-
-		if (Snapshot && Consumer)
+		UPCGExSchedulingSubsystem* Subsystem = UPCGExSchedulingSubsystem::GetInstance(GetWorld());
+		if (Subsystem)
 		{
-			bConsumerRegistered = true;
+			AcquiredQuery = BuildTargetQuery();
+			CachedSlot = Subsystem->AcquireTargetSlot(AcquiredQuery, this);
 		}
 
-		return Snapshot;
+		if (!CachedSlot)
+		{
+			CachedSnapshot.Reset();
+			CachedRegions.Reset();
+			return nullptr;
+		}
 	}
 
-	return Subsystem->GetCachedTargetSnapshot(this);
+	// Padding is read live so runtime edits of expansion / hysteresis / invert take effect on the next scan.
+	const double RegionExpansion = GetBoundsExpansion();
+	const double CleanupScale = GetRegionScale(/*bExpanded=*/true);
+
+	if (CachedSnapshot != CachedSlot->Snapshot || CachedRegionExpansion != RegionExpansion || CachedCleanupScale != CleanupScale)
+	{
+		CachedSnapshot = CachedSlot->Snapshot;
+		CachedRegionExpansion = RegionExpansion;
+		CachedCleanupScale = CleanupScale;
+		BakeRegions();
+	}
+
+	return CachedSnapshot.Get();
+}
+
+void UPCGExSchedulingConstraintTargetsBase::BakeRegions() const
+{
+	CachedRegions.Reset();
+
+	if (!CachedSnapshot)
+	{
+		return;
+	}
+
+	CachedRegions.Reserve(CachedSnapshot->Shapes.Num());
+
+	for (const FPCGExTargetShape& Shape : CachedSnapshot->Shapes)
+	{
+		FPCGExTargetRegion& Region = CachedRegions.Emplace_GetRef();
+		Region.Generate = Shape.Bounds.ExpandBy(CachedRegionExpansion);
+		Region.Cleanup = FBox::BuildAABB(Region.Generate.GetCenter(), Region.Generate.GetExtent() * CachedCleanupScale);
+	}
+}
+
+void UPCGExSchedulingConstraintTargetsBase::ReleaseTargetSlot() const
+{
+	check(IsInGameThread());
+
+	if (!CachedSlot)
+	{
+		return;
+	}
+
+	if (UPCGExSchedulingSubsystem* Subsystem = UPCGExSchedulingSubsystem::GetInstance(GetWorld()))
+	{
+		Subsystem->ReleaseTargetSlot(AcquiredQuery, this);
+	}
+
+	CachedSlot.Reset();
+	CachedSnapshot.Reset();
+	CachedRegions.Reset();
 }
 
 double UPCGExSchedulingConstraintTargetsBase::GetRegionScale(const bool bExpanded) const
@@ -265,20 +361,18 @@ double UPCGExSchedulingConstraintTargetsBase::GetRegionScale(const bool bExpande
 
 #pragma region UPCGExSchedulingConstraintTargetBounds
 
-bool UPCGExSchedulingConstraintTargetBounds::TestShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const
+bool UPCGExSchedulingConstraintTargetBounds::TestShape(const FPCGExTargetShape& InShape, const FBox& InRegion, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const
 {
-	const FBox Region = PCGExSchedulingConstraintTargets::ScaledRegion(InShape.Bounds, BoundsExpansion, InContext.Scale);
-	return PCGExSchedulingConstraintTargets::BoxOverlap(Region, InBounds, InContext.bUse2DGrid);
+	return PCGExSchedulingConstraintTargets::BoxOverlap(InRegion, InBounds, InContext.bUse2DGrid);
 }
 
 #pragma endregion
 
 #pragma region UPCGExSchedulingConstraintTargetVolume
 
-bool UPCGExSchedulingConstraintTargetVolume::TestShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const
+bool UPCGExSchedulingConstraintTargetVolume::TestShape(const FPCGExTargetShape& InShape, const FBox& InRegion, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const
 {
-	const FBox Region = PCGExSchedulingConstraintTargets::ScaledRegion(InShape.Bounds, BoundsExpansion, InContext.Scale);
-	if (!PCGExSchedulingConstraintTargets::BoxOverlap(Region, InBounds, InContext.bUse2DGrid))
+	if (!PCGExSchedulingConstraintTargets::BoxOverlap(InRegion, InBounds, InContext.bUse2DGrid))
 	{
 		return false;
 	}
@@ -302,13 +396,10 @@ bool UPCGExSchedulingConstraintTargetVolume::TestShape(const FPCGExTargetShape& 
 
 #pragma region UPCGExSchedulingConstraintTargetSpline
 
-bool UPCGExSchedulingConstraintTargetSpline::TestShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const
+bool UPCGExSchedulingConstraintTargetSpline::TestShape(const FPCGExTargetShape& InShape, const FBox& InRegion, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const
 {
-	const double Radius = SplineRadius * InContext.Scale;
-
 	// Broadphase against the polyline bounds inflated by the corridor.
-	const FBox Region = PCGExSchedulingConstraintTargets::ScaledRegion(InShape.Bounds, SplineRadius, InContext.Scale);
-	if (!PCGExSchedulingConstraintTargets::BoxOverlap(Region, InBounds, InContext.bUse2DGrid))
+	if (!PCGExSchedulingConstraintTargets::BoxOverlap(InRegion, InBounds, InContext.bUse2DGrid))
 	{
 		return false;
 	}
@@ -319,32 +410,39 @@ bool UPCGExSchedulingConstraintTargetSpline::TestShape(const FPCGExTargetShape& 
 		return true;
 	}
 
-	// Conservative-inclusive: distance from the cell center to the polyline vs corridor + cell circumradius.
+	// Conservative-inclusive: distance from the cell center to the polyline vs corridor + cell
+	// circumradius. The walk stops at the first segment within the threshold.
+	const double Radius = SplineRadius * GetRegionScale(InContext.bExpanded);
+	const FVector CellCenter = InBounds.GetCenter();
 	const double Threshold = Radius + PCGExSchedulingConstraintTargets::CellCircumradius(InBounds, InContext.bUse2DGrid);
-	if (PCGExSchedulingConstraintTargets::PolylineDistance(InShape, InBounds, InContext.bUse2DGrid) <= Threshold)
+	const double ThresholdSquared = Threshold * Threshold;
+
+	if (PCGExSchedulingConstraintTargets::PolylineDistanceSquared(InShape, CellCenter, InContext.bUse2DGrid, ThresholdSquared) <= ThresholdSquared)
 	{
 		return true;
 	}
 
 	// Interior fill for closed splines. Membership deep inside is scale-independent --
 	// the corridor (scaled) provides the hysteresis band at the polygon boundary.
-	return bFillClosedSplines && PCGExSchedulingConstraintTargets::InsideFilledSpline(InShape, InBounds.GetCenter(), Radius, InContext.bUse2DGrid);
+	return bFillClosedSplines && PCGExSchedulingConstraintTargets::InsideFilledSpline(InShape, CellCenter, Radius, InContext.bUse2DGrid);
 }
 
-double UPCGExSchedulingConstraintTargetSpline::DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const bool bUse2DGrid) const
+double UPCGExSchedulingConstraintTargetSpline::DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InGenerateRegion, const FBox& InBounds, const bool bUse2DGrid) const
 {
 	if (InShape.SplinePoints.Num() < 2)
 	{
-		return PCGExSchedulingConstraintTargets::BoxToBoxDistance(InShape.Bounds.ExpandBy(SplineRadius), InBounds, bUse2DGrid);
+		return PCGExSchedulingConstraintTargets::BoxToBoxDistance(InGenerateRegion, InBounds, bUse2DGrid);
 	}
 
-	if (bFillClosedSplines && PCGExSchedulingConstraintTargets::InsideFilledSpline(InShape, InBounds.GetCenter(), SplineRadius, bUse2DGrid))
+	const FVector CellCenter = InBounds.GetCenter();
+
+	if (bFillClosedSplines && PCGExSchedulingConstraintTargets::InsideFilledSpline(InShape, CellCenter, SplineRadius, bUse2DGrid))
 	{
 		return 0.0;
 	}
 
-	// Distance to the corridor surface (0 inside).
-	const double Distance = PCGExSchedulingConstraintTargets::PolylineDistance(InShape, InBounds, bUse2DGrid) - SplineRadius;
+	// Distance to the corridor surface (0 inside). Exact minimum: no early stop.
+	const double Distance = FMath::Sqrt(PCGExSchedulingConstraintTargets::PolylineDistanceSquared(InShape, CellCenter, bUse2DGrid, 0.0)) - SplineRadius;
 	return FMath::Max(Distance, 0.0);
 }
 

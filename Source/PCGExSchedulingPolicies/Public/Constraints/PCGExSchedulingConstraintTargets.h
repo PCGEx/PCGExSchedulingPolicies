@@ -15,9 +15,6 @@ class AActor;
 /** Evaluation context passed to target shape tests. */
 struct FPCGExTargetTestContext
 {
-	/** Region scale (hysteresis, inversion-aware). */
-	double Scale = 1.0;
-
 	/** True when evaluating the cleanup variant. */
 	bool bExpanded = false;
 
@@ -27,13 +24,28 @@ struct FPCGExTargetTestContext
 	bool bGameThread = false;
 };
 
+/** Consumer-side padded regions of one target shape. */
+struct FPCGExTargetRegion
+{
+	/** Shape bounds expanded by the constraint's bounds expansion -- the generate-gate broadphase. */
+	FBox Generate = FBox(EForceInit::ForceInit);
+
+	/** Generate scaled about its center by the cleanup scale -- the cleanup-gate broadphase. */
+	FBox Cleanup = FBox(EForceInit::ForceInit);
+
+	const FBox& Get(const bool bExpanded) const { return bExpanded ? Cleanup : Generate; }
+};
+
 /**
  * Base for world-region target constraints: cells generate while they intersect regions
  * derived from target actors (bounds, volumes, splines). Targets are discovered through
  * explicit references and/or an amortized actor-tag query, resolved into immutable
- * snapshots by the scheduling subsystem, and optionally tracked for movement -- moving
- * targets force a runtime-gen rescan of the owning component (engine change detection
- * only reacts to generation source movement).
+ * snapshots by the scheduling subsystem (shared between constraints with equal queries),
+ * and optionally tracked for movement -- moving targets rebuild the snapshot and, when
+ * bRefreshOnTargetChange is set, force a runtime-gen rescan of the owning component.
+ *
+ * Padding (bounds expansion, cleanup hysteresis) is baked per constraint from the shared
+ * snapshot on the scan path, so runtime edits of those properties take effect on the next scan.
  *
  * The generation source itself is ignored by these gates: source proximity remains the
  * engine's generation-radii broadphase (compose with shape constraints for more).
@@ -68,6 +80,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Settings, meta = (EditCondition = "bTrackTargetMovement", ClampMin = 1.0, Units = "cm"))
 	float MovementTolerance = 50.0f;
 
+	/** Seconds between movement and streaming checks on the resolved targets. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Settings, meta = (ClampMin = 0.1))
+	float TrackingInterval = 2.0f;
+
+	/**
+	 * Full cleanup + regenerate of the owning component whenever the target set changes (move, death, stream-in,
+	 * tag scan). Disable for frequently moving targets and let generation source movement pick changes up.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Settings)
+	bool bRefreshOnTargetChange = true;
+
 	/** Region scale applied when evaluating cleanup, creating hysteresis so cells don't flicker at region borders. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = 1.0))
 	float CleanupExpansionScale = 1.1f;
@@ -83,6 +106,8 @@ public:
 	//~ Begin UPCGExSchedulingConstraint interface
 	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const override;
 	virtual TOptional<double> CalcPriority(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid) const override;
+	virtual bool DebugDrawsPerSource() const override { return false; }
+	virtual void DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, bool bUse2DGrid, bool bDrawCleanup) const override;
 	//~ End UPCGExSchedulingConstraint interface
 
 #if WITH_EDITOR
@@ -96,27 +121,45 @@ protected:
 	/** Polyline flattening tolerance for Spline geometry. */
 	virtual float GetSplineErrorTolerance() const { return 50.0f; }
 
-	/** Cell-vs-region test. Must be worker-safe unless InContext.bGameThread. */
-	virtual bool TestShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const { return false; }
+	/** Cell-vs-region test. InRegion is this constraint's padded region for InShape. Must be worker-safe unless InContext.bGameThread. */
+	virtual bool TestShape(const FPCGExTargetShape& InShape, const FBox& InRegion, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const { return false; }
 
-	/** Flat world-space expansion applied to region bounds by the shared box machinery. */
+	/** Flat world-space expansion baked into every region (bounds expansion, spline corridor radius). */
 	virtual float GetBoundsExpansion() const { return 0.0f; }
 
 	/** Distance from the cell to the region, for priority -- shared box-based default. Game thread only. */
-	virtual double DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, bool bUse2DGrid) const;
+	virtual double DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InGenerateRegion, const FBox& InBounds, bool bUse2DGrid) const;
 
-	/** Query descriptor handed to the subsystem registry. */
+	/** Query descriptor handed to the subsystem cache -- also its key, so equal queries share one snapshot. */
 	FPCGExTargetQuery BuildTargetQuery() const;
 
-	/** Current snapshot: resolves on the game thread, cached-only on workers. */
-	TSharedPtr<const FPCGExTargetSnapshot> GetTargetSnapshot() const;
+	/**
+	 * Scan-path accessor: acquires the subsystem slot on first use, then refreshes the cached
+	 * snapshot and re-bakes the padded regions whenever the shared snapshot or the padding changed.
+	 * Game thread, never from the cleanup path -- cleanup reads CachedSnapshot / CachedRegions as-is.
+	 */
+	const FPCGExTargetSnapshot* RefreshTargetSnapshot() const;
+
+	/** Hands the slot back to the subsystem (constraint edited) so the next scan re-acquires with the new query. Game thread. */
+	void ReleaseTargetSlot() const;
 
 	/** Region scale for a gate evaluation: enlarged for regular cleanup, shrunk for inverted cleanup. */
 	double GetRegionScale(bool bExpanded) const;
 
+	/** Last scan's snapshot and regions, parallel arrays. Read-only on the cleanup path. */
+	const FPCGExTargetSnapshot* GetCachedSnapshot() const { return CachedSnapshot.Get(); }
+	const TArray<FPCGExTargetRegion>& GetCachedRegions() const { return CachedRegions; }
+
 private:
-	/** One-time consumer registration -- afterwards the per-cell resolve fast path skips the outer-walk and consumer lookup. */
-	mutable bool bConsumerRegistered = false;
+	void BakeRegions() const;
+
+	/** Subsystem cache slot for AcquiredQuery. Written on the scan path only. */
+	mutable TSharedPtr<FPCGExTargetCacheSlot> CachedSlot;
+	mutable TSharedPtr<const FPCGExTargetSnapshot> CachedSnapshot;
+	mutable TArray<FPCGExTargetRegion> CachedRegions;
+	mutable double CachedRegionExpansion = 0.0;
+	mutable double CachedCleanupScale = 1.0;
+	mutable FPCGExTargetQuery AcquiredQuery;
 };
 
 /** Cells generate while they overlap target actors' bounds. */
@@ -132,7 +175,7 @@ public:
 
 protected:
 	virtual float GetBoundsExpansion() const override { return BoundsExpansion; }
-	virtual bool TestShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const override;
+	virtual bool TestShape(const FPCGExTargetShape& InShape, const FBox& InRegion, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const override;
 };
 
 /** Cells generate while they overlap target volumes. Bounds-box test by default; optional precise brush test on the generation path. */
@@ -159,7 +202,7 @@ public:
 protected:
 	virtual EPCGExTargetGeometry GetTargetGeometry() const override { return EPCGExTargetGeometry::Volume; }
 	virtual float GetBoundsExpansion() const override { return BoundsExpansion; }
-	virtual bool TestShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const override;
+	virtual bool TestShape(const FPCGExTargetShape& InShape, const FBox& InRegion, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const override;
 };
 
 /** Cells generate while they are within a corridor radius of target splines. Actors without splines fall back to their bounds. */
@@ -187,6 +230,8 @@ public:
 protected:
 	virtual EPCGExTargetGeometry GetTargetGeometry() const override { return EPCGExTargetGeometry::Spline; }
 	virtual float GetSplineErrorTolerance() const override { return SplineErrorTolerance; }
-	virtual bool TestShape(const FPCGExTargetShape& InShape, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const override;
-	virtual double DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InBounds, bool bUse2DGrid) const override;
+	/** The corridor radius pads the polyline bounds into the broadphase region. */
+	virtual float GetBoundsExpansion() const override { return SplineRadius; }
+	virtual bool TestShape(const FPCGExTargetShape& InShape, const FBox& InRegion, const FBox& InBounds, const FPCGExTargetTestContext& InContext) const override;
+	virtual double DistanceToShape(const FPCGExTargetShape& InShape, const FBox& InGenerateRegion, const FBox& InBounds, bool bUse2DGrid) const override;
 };

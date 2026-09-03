@@ -8,14 +8,30 @@
 #include "PCGExSchedulingConstraint.generated.h"
 
 class IPCGGenSourceBase;
+class UWorld;
+
+namespace PCGExSchedulingDebug
+{
+	/** Gate region: green, cyan when inverted. */
+	FORCEINLINE FColor GateColor(const bool bInvert) { return bInvert ? FColor::Cyan : FColor::Green; }
+
+	/** Cleanup (hysteresis) variant. */
+	FORCEINLINE FColor CleanupColor() { return FColor::Orange; }
+
+	/** Hollow interior. */
+	FORCEINLINE FColor InteriorColor() { return FColor::Red; }
+}
 
 /**
  * A single composable scheduling constraint, stacked on a UPCGExSchedulingPolicy.
  * Extending the system means adding a constraint class -- never a new policy.
  *
- * Threading contract: EvaluateGate with bExpanded=true is invoked from the runtime-gen
- * scheduler's cleanup ParallelFor (worker threads). Implementations must only read their
- * own properties, the generation source getters, and immutable subsystem snapshots.
+ * Threading contract (verified against the 5.8 runtime-gen scheduler):
+ * - EvaluateGate with bExpanded=false, CalcPriority and DebugDraw run on the game thread, outside any
+ *   parallel loop. They may refresh cached state.
+ * - EvaluateGate with bExpanded=true (cleanup) runs inside a ParallelFor that the game thread joins:
+ *   game-thread and worker calls are CONCURRENT. It must be strictly read-only -- no member writes,
+ *   whatever IsInGameThread() says. Cleanup reads whatever the last scan cached.
  */
 UCLASS(Abstract, BlueprintType, Blueprintable, EditInlineNew, DefaultToInstanced, CollapseCategories, ClassGroup = (Procedural))
 class PCGEXSCHEDULINGPOLICIES_API UPCGExSchedulingConstraint : public UObject
@@ -38,7 +54,7 @@ public:
 	/**
 	 * Gate test for a grid cell against a generation source. Must honor bInvert.
 	 * bExpanded=true evaluates the enlarged cleanup variant (hysteresis) used by ShouldCull --
-	 * runs on worker threads, see the class threading contract.
+	 * read-only and concurrent, see the class threading contract.
 	 */
 	virtual bool EvaluateGate(const IPCGGenSourceBase* InGenSource, const FBox& InBounds, bool bUse2DGrid, bool bExpanded) const { return true; }
 
@@ -53,4 +69,13 @@ public:
 	 * covered automatically. Override only for non-property state.
 	 */
 	virtual bool IsEquivalentTo(const UPCGExSchedulingConstraint* InOther) const;
+
+	/** False for constraints whose regions don't depend on the generation source -- drawn once, with a null source. */
+	virtual bool DebugDrawsPerSource() const { return true; }
+
+	/**
+	 * Draws this constraint's regions (pcgex.Scheduling.DebugDraw). InGenSource is null when
+	 * DebugDrawsPerSource is false. Game thread; only called when debug drawing is compiled in.
+	 */
+	virtual void DebugDraw(const UWorld* InWorld, const IPCGGenSourceBase* InGenSource, bool bUse2DGrid, bool bDrawCleanup) const {}
 };
