@@ -9,6 +9,8 @@ Composable scheduling constraints (shapes, view signals, world targets), a 64-ch
 
 ## PCGEx Scheduling Policy
 
+[Sche.webm](https://github.com/user-attachments/assets/65e9da45-d59c-4a9c-8c27-4a2514872972)
+
 A composable replacement for the stock Distance & Direction policy -- pick it in the PCG component's `Scheduling Policy Class` and stack constraints:
 
 - **Shapes** -- Sphere, Cylinder, Box (yaw-alignable), Cone; solid or **hollow** (surface shell with configurable thickness).
