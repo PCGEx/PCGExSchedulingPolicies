@@ -3,7 +3,7 @@
   "Version": 1,
   "VersionName": "1.0.0",
   "FriendlyName": "PCGEx | Scheduling Policies",
-  "Description": "Exotic runtime scheduling policies for PCG. Composable scheduling constraints (shapes, view signals, world targets), a 64-channel layering system so generation sources only trigger matching runtime components, and channel-aware graph nodes that switch content based on who triggered generation. Standalone.",
+  "Description": "Exotic runtime scheduling policies for PCG. Composable + 64-channel layering system & channel-aware graph nodes.",
   "Category": "PCG",
   "CreatedBy": "Timothé Lapetite",
   "CreatedByURL": "https://pcgex.gitbook.io/pcgex/essentials/tools/scheduling-policies",
