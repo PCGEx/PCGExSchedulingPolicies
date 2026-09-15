@@ -7,6 +7,7 @@
 #include "IPropertyTypeCustomization.h"
 
 class IPropertyHandle;
+class SWidget;
 
 /**
  * Picker for FPCGExChannelSelector: a checkbox menu of the channels defined in
