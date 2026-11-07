@@ -11,7 +11,7 @@
   "FabURL": "com.epicgames.launcher://ue/Fab/product/ed6292ce-9c7f-4368-861c-5f00983d9b53",
   "SupportURL": "https://discord.gg/mde2vC5gbE",
   "CanContainContent": false,
-  "EngineVersion": "5.8.0",
+  "EngineVersion": "5.9.0",
   "IsBetaVersion": false,
   "Installed": false,
   "Modules": [
