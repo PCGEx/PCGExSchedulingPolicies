@@ -11,20 +11,23 @@
 
 namespace PCGExSchedulingShapes
 {
-	/** Source position flattened onto the cell plane for 2D grids (scheduler convention: Z = bounds min). */
-	inline FVector SanitizedSourcePosition(const FVector& InPosition, const FBox& InBounds, const bool bUse2DGrid)
+	/** 2D grids flatten the source onto the cell floor and ignore height unless pcg.RuntimeGeneration.Use3DDistanceFor2DGrids is on. */
+	PCGEXSCHEDULINGPOLICIES_API bool ShouldFlattenSource(bool bUse2DGrid);
+
+	/** Source position, flattened onto the cell floor (Z = bounds min) when asked. */
+	inline FVector SanitizedSourcePosition(const FVector& InPosition, const FBox& InBounds, const bool bFlatten)
 	{
 		FVector OutPosition = InPosition;
-		if (bUse2DGrid) { OutPosition.Z = InBounds.Min.Z; }
+		if (bFlatten) { OutPosition.Z = InBounds.Min.Z; }
 		return OutPosition;
 	}
 
-	/** Squared distance from the FARTHEST point of a box to a point (Z ignored on 2D grids) -- 'cell fully inside sphere' tests. */
-	inline double MaxSquaredDistanceToPoint(const FBox& InBounds, const FVector& InPoint, const bool bUse2DGrid)
+	/** Squared distance from the FARTHEST point of a box to a point (Z ignored when asked) -- 'cell fully inside sphere' tests. */
+	inline double MaxSquaredDistanceToPoint(const FBox& InBounds, const FVector& InPoint, const bool bIgnoreZ)
 	{
 		const double DX = FMath::Max(FMath::Abs(InBounds.Min.X - InPoint.X), FMath::Abs(InBounds.Max.X - InPoint.X));
 		const double DY = FMath::Max(FMath::Abs(InBounds.Min.Y - InPoint.Y), FMath::Abs(InBounds.Max.Y - InPoint.Y));
-		const double DZ = bUse2DGrid ? 0.0 : FMath::Max(FMath::Abs(InBounds.Min.Z - InPoint.Z), FMath::Abs(InBounds.Max.Z - InPoint.Z));
+		const double DZ = bIgnoreZ ? 0.0 : FMath::Max(FMath::Abs(InBounds.Min.Z - InPoint.Z), FMath::Abs(InBounds.Max.Z - InPoint.Z));
 		return DX * DX + DY * DY + DZ * DZ;
 	}
 
@@ -173,7 +176,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = 1.0, Units = "cm"))
 	double Radius = 25600.0;
 
-	/** Cylinder half height, centered on the generation source. Ignored on 2D grids. */
+	/**
+	 * Cylinder half height, centered on the generation source. Ignored on 2D grids while
+	 * pcg.RuntimeGeneration.Use3DDistanceFor2DGrids is off.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Settings, meta = (ClampMin = 1.0, Units = "cm"))
 	double HalfHeight = 12800.0;
 

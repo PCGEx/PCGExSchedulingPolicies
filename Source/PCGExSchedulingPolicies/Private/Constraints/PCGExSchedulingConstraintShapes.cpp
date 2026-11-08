@@ -9,12 +9,26 @@
 
 #include "DrawDebugHelpers.h"
 #include "EngineDefines.h"
+#include "HAL/IConsoleManager.h"
 #include "Math/Box2D.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(PCGExSchedulingConstraintShapes)
 
 namespace PCGExSchedulingShapes
 {
+	bool ShouldFlattenSource(const bool bUse2DGrid)
+	{
+		if (!bUse2DGrid)
+		{
+			return false;
+		}
+
+		// Cached once (static init is thread-safe; the cleanup path calls this concurrently), read per call.
+		// Engines without the CVar always flatten.
+		static const IConsoleVariable* const CVarUse3DDistance = IConsoleManager::Get().FindConsoleVariable(TEXT("pcg.RuntimeGeneration.Use3DDistanceFor2DGrids"));
+		return !CVarUse3DDistance || !CVarUse3DDistance->GetBool();
+	}
+
 	TOptional<FVector> GetSourcePosition(const IPCGGenSourceBase* InGenSource)
 	{
 		return InGenSource ? InGenSource->GetPosition() : TOptional<FVector>();
@@ -226,14 +240,15 @@ bool UPCGExSchedulingConstraintSphere::EvaluateGate(const IPCGGenSourceBase* InG
 		return bInvert;
 	}
 
-	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, bUse2DGrid);
+	const bool bFlatten = PCGExSchedulingShapes::ShouldFlattenSource(bUse2DGrid);
+	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, bFlatten);
 	const double ScaledRadius = Radius * GetGateScale(bExpanded);
 	bool bInside = InBounds.ComputeSquaredDistanceToPoint(SourcePosition) <= ScaledRadius * ScaledRadius;
 
 	if (bInside && bHollow)
 	{
 		const double InnerRadius = FMath::Max(Radius - ShellThickness, 0.0) * GetInnerGateScale(bExpanded);
-		if (InnerRadius > 0.0 && PCGExSchedulingShapes::MaxSquaredDistanceToPoint(InBounds, SourcePosition, bUse2DGrid) <= InnerRadius * InnerRadius)
+		if (InnerRadius > 0.0 && PCGExSchedulingShapes::MaxSquaredDistanceToPoint(InBounds, SourcePosition, bFlatten) <= InnerRadius * InnerRadius)
 		{
 			// Cell fully inside the hollow interior.
 			bInside = false;
@@ -252,7 +267,7 @@ TOptional<double> UPCGExSchedulingConstraintSphere::CalcPriority(const IPCGGenSo
 		return TOptional<double>();
 	}
 
-	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, bUse2DGrid);
+	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, PCGExSchedulingShapes::ShouldFlattenSource(bUse2DGrid));
 	const double Distance = FMath::Sqrt(InBounds.ComputeSquaredDistanceToPoint(SourcePosition));
 
 	return ShapedPriority(1.0 - Distance / FMath::Max(Radius, 1.0));
@@ -295,6 +310,7 @@ bool UPCGExSchedulingConstraintCylinder::EvaluateGate(const IPCGGenSourceBase* I
 	}
 
 	const FVector& SourcePosition = Frame.Position.GetValue();
+	const bool bFlatten = PCGExSchedulingShapes::ShouldFlattenSource(bUse2DGrid);
 	const double Scale = GetGateScale(bExpanded);
 
 	const FBox2D BoundsXY(FVector2D(InBounds.Min), FVector2D(InBounds.Max));
@@ -302,7 +318,7 @@ bool UPCGExSchedulingConstraintCylinder::EvaluateGate(const IPCGGenSourceBase* I
 
 	bool bInside = BoundsXY.ComputeSquaredDistanceToPoint(FVector2D(SourcePosition)) <= ScaledRadius * ScaledRadius;
 
-	if (bInside && !bUse2DGrid)
+	if (bInside && !bFlatten)
 	{
 		const double ScaledHalfHeight = HalfHeight * Scale;
 		bInside = (InBounds.Min.Z <= SourcePosition.Z + ScaledHalfHeight) && (InBounds.Max.Z >= SourcePosition.Z - ScaledHalfHeight);
@@ -314,11 +330,11 @@ bool UPCGExSchedulingConstraintCylinder::EvaluateGate(const IPCGGenSourceBase* I
 		const double InnerRadius = FMath::Max(Radius - ShellThickness, 0.0) * InnerScale;
 		const double InnerHalfHeight = FMath::Max(HalfHeight - ShellThickness, 0.0) * InnerScale;
 
-		if (InnerRadius > 0.0 && (bUse2DGrid || InnerHalfHeight > 0.0))
+		if (InnerRadius > 0.0 && (bFlatten || InnerHalfHeight > 0.0))
 		{
 			// Radial: farthest XY point of the cell within the inner radius.
-			const bool bFullyInsideRadially = PCGExSchedulingShapes::MaxSquaredDistanceToPoint(InBounds, SourcePosition, /*bUse2DGrid=*/true) <= InnerRadius * InnerRadius;
-			const bool bFullyInsideVertically = bUse2DGrid
+			const bool bFullyInsideRadially = PCGExSchedulingShapes::MaxSquaredDistanceToPoint(InBounds, SourcePosition, /*bIgnoreZ=*/true) <= InnerRadius * InnerRadius;
+			const bool bFullyInsideVertically = bFlatten
 				|| ((InBounds.Min.Z >= SourcePosition.Z - InnerHalfHeight) && (InBounds.Max.Z <= SourcePosition.Z + InnerHalfHeight));
 
 			if (bFullyInsideRadially && bFullyInsideVertically)
@@ -357,11 +373,12 @@ void UPCGExSchedulingConstraintCylinder::DebugDraw(const UWorld* InWorld, const 
 	}
 
 	const FVector Center = Position.GetValue();
+	const bool bFlatten = PCGExSchedulingShapes::ShouldFlattenSource(bUse2DGrid);
 
-	// 2D grids ignore the height: a flat circle is the honest picture.
+	// Flattened gates ignore the height: a flat circle is the honest picture.
 	auto DrawCylinder = [&](const double InRadius, const double InHalfHeight, const FColor& InColor)
 	{
-		if (bUse2DGrid)
+		if (bFlatten)
 		{
 			PCGExSchedulingConstraintShapes::DebugDrawAxisCircle(InWorld, Center, FVector::UpVector, InRadius, InColor);
 		}
@@ -373,7 +390,7 @@ void UPCGExSchedulingConstraintCylinder::DebugDraw(const UWorld* InWorld, const 
 
 	const double InnerRadius = bHollow ? FMath::Max(Radius - ShellThickness, 0.0) : 0.0;
 	const double InnerHalfHeight = bHollow ? FMath::Max(HalfHeight - ShellThickness, 0.0) : 0.0;
-	const bool bHasInterior = InnerRadius > 0.0 && (bUse2DGrid || InnerHalfHeight > 0.0);
+	const bool bHasInterior = InnerRadius > 0.0 && (bFlatten || InnerHalfHeight > 0.0);
 
 	DebugDrawVariants(bDrawCleanup, [&](const double OuterScale, const double InnerScale, const FColor& OuterColor, const FColor& InnerColor)
 	{
@@ -400,6 +417,7 @@ bool UPCGExSchedulingConstraintBox::EvaluateGate(const IPCGGenSourceBase* InGenS
 	}
 
 	const FVector& SourcePosition = Frame.Position.GetValue();
+	const bool bFlatten = PCGExSchedulingShapes::ShouldFlattenSource(bUse2DGrid);
 	const FVector ScaledExtents = Extents * GetGateScale(bExpanded);
 	const TOptional<FVector2D> YawDirection = bAlignToSourceDirection ? Frame.GetYaw() : TOptional<FVector2D>();
 
@@ -419,7 +437,7 @@ bool UPCGExSchedulingConstraintBox::EvaluateGate(const IPCGGenSourceBase* InGenS
 				SourcePosition.Y - ScaledExtents.Y, SourcePosition.Y + ScaledExtents.Y, InBounds.Min.Y, InBounds.Max.Y);
 	}
 
-	if (bInside && !bUse2DGrid)
+	if (bInside && !bFlatten)
 	{
 		bInside = PCGExScheduling::IntervalsOverlap(
 			SourcePosition.Z - ScaledExtents.Z, SourcePosition.Z + ScaledExtents.Z, InBounds.Min.Z, InBounds.Max.Z);
@@ -434,7 +452,7 @@ bool UPCGExSchedulingConstraintBox::EvaluateGate(const IPCGGenSourceBase* InGenS
 			FMath::Max(Extents.Z - ShellThickness, 0.0) * InnerScale);
 
 		// The erosion may consume an axis entirely -- then there is no interior and the shell is the whole shape.
-		if (InnerExtents.X > 0.0 && InnerExtents.Y > 0.0 && (bUse2DGrid || InnerExtents.Z > 0.0))
+		if (InnerExtents.X > 0.0 && InnerExtents.Y > 0.0 && (bFlatten || InnerExtents.Z > 0.0))
 		{
 			bool bFullyInside;
 
@@ -450,7 +468,7 @@ bool UPCGExSchedulingConstraintBox::EvaluateGate(const IPCGGenSourceBase* InGenS
 					&& InBounds.Min.Y >= SourcePosition.Y - InnerExtents.Y && InBounds.Max.Y <= SourcePosition.Y + InnerExtents.Y;
 			}
 
-			if (bFullyInside && !bUse2DGrid)
+			if (bFullyInside && !bFlatten)
 			{
 				bFullyInside = InBounds.Min.Z >= SourcePosition.Z - InnerExtents.Z && InBounds.Max.Z <= SourcePosition.Z + InnerExtents.Z;
 			}
@@ -474,7 +492,8 @@ TOptional<double> UPCGExSchedulingConstraintBox::CalcPriority(const IPCGGenSourc
 		return TOptional<double>();
 	}
 
-	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, bUse2DGrid);
+	const bool bFlatten = PCGExSchedulingShapes::ShouldFlattenSource(bUse2DGrid);
+	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, bFlatten);
 	FVector Delta = InBounds.GetClosestPointTo(SourcePosition) - SourcePosition;
 
 	// Express the offset in the box frame when yaw-aligned so closeness follows the shape.
@@ -491,7 +510,7 @@ TOptional<double> UPCGExSchedulingConstraintBox::CalcPriority(const IPCGGenSourc
 
 	// Chebyshev-style closeness: 0 at the box surface, 1 at the source.
 	double MaxAxisRatio = FMath::Max(FMath::Abs(Delta.X) / FMath::Max(Extents.X, 1.0), FMath::Abs(Delta.Y) / FMath::Max(Extents.Y, 1.0));
-	if (!bUse2DGrid)
+	if (!bFlatten)
 	{
 		MaxAxisRatio = FMath::Max(MaxAxisRatio, FMath::Abs(Delta.Z) / FMath::Max(Extents.Z, 1.0));
 	}
@@ -510,6 +529,7 @@ void UPCGExSchedulingConstraintBox::DebugDraw(const UWorld* InWorld, const IPCGG
 	}
 
 	const FVector Center = Frame.Position.GetValue();
+	const bool bFlatten = PCGExSchedulingShapes::ShouldFlattenSource(bUse2DGrid);
 
 	FQuat Rotation = FQuat::Identity;
 	if (bAlignToSourceDirection && Frame.FlatDirection.IsSet())
@@ -519,14 +539,14 @@ void UPCGExSchedulingConstraintBox::DebugDraw(const UWorld* InWorld, const IPCGG
 
 	auto DrawBox = [&](FVector InExtents, const FColor& InColor)
 	{
-		if (bUse2DGrid) { InExtents.Z = 0.0; }
+		if (bFlatten) { InExtents.Z = 0.0; }
 		DrawDebugBox(InWorld, Center, InExtents, Rotation, InColor, /*bPersistentLines=*/false, /*LifeTime=*/0.0f, /*DepthPriority=*/0, PCGExSchedulingConstraintShapes::DebugThickness);
 	};
 
 	const FVector InnerExtents = bHollow
 		                             ? FVector(FMath::Max(Extents.X - ShellThickness, 0.0), FMath::Max(Extents.Y - ShellThickness, 0.0), FMath::Max(Extents.Z - ShellThickness, 0.0))
 		                             : FVector::ZeroVector;
-	const bool bHasInterior = InnerExtents.X > 0.0 && InnerExtents.Y > 0.0 && (bUse2DGrid || InnerExtents.Z > 0.0);
+	const bool bHasInterior = InnerExtents.X > 0.0 && InnerExtents.Y > 0.0 && (bFlatten || InnerExtents.Z > 0.0);
 
 	DebugDrawVariants(bDrawCleanup, [&](const double OuterScale, const double InnerScale, const FColor& OuterColor, const FColor& InnerColor)
 	{
@@ -557,8 +577,9 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 
 	FVector Apex = Frame.Position.GetValue();
 	const FVector Axis = Frame.GetAxis(bUse2DGrid);
+	const bool bFlatten = PCGExSchedulingShapes::ShouldFlattenSource(bUse2DGrid);
 
-	if (bUse2DGrid)
+	if (bFlatten)
 	{
 		Apex.Z = InBounds.Min.Z;
 	}
@@ -573,7 +594,7 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 		if (bInside && bHollow)
 		{
 			const double InnerRadius = FMath::Max(Range - ShellThickness, 0.0) * GetInnerGateScale(bExpanded);
-			if (InnerRadius > 0.0 && PCGExSchedulingShapes::MaxSquaredDistanceToPoint(InBounds, Apex, bUse2DGrid) <= InnerRadius * InnerRadius)
+			if (InnerRadius > 0.0 && PCGExSchedulingShapes::MaxSquaredDistanceToPoint(InBounds, Apex, bFlatten) <= InnerRadius * InnerRadius)
 			{
 				bInside = false;
 			}
@@ -581,12 +602,17 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 	}
 	else
 	{
-		// Cell bounding sphere, flattened onto the cell plane for 2D grids.
+		// Cell bounding sphere; on 2D grids the column's XY disc (collapsed onto its floor when flattened). The 2D axis
+		// is horizontal, so cone slices shrink away from the apex height: the nearest column height bounds the overlap,
+		// the farthest bounds the interior containment.
 		FVector SphereCenter = InBounds.GetCenter();
 		FVector SphereExtents = InBounds.GetExtent();
+		FVector InteriorSphereCenter = SphereCenter;
 		if (bUse2DGrid)
 		{
-			SphereCenter.Z = InBounds.Min.Z;
+			const double ColumnTop = bFlatten ? InBounds.Min.Z : InBounds.Max.Z;
+			SphereCenter.Z = FMath::Clamp(Apex.Z, InBounds.Min.Z, ColumnTop);
+			InteriorSphereCenter.Z = (Apex.Z - InBounds.Min.Z > ColumnTop - Apex.Z) ? InBounds.Min.Z : ColumnTop;
 			SphereExtents.Z = 0.0;
 		}
 
@@ -613,7 +639,7 @@ bool UPCGExSchedulingConstraintCone::EvaluateGate(const IPCGGenSourceBase* InGen
 				const FVector InnerApex = Apex + Axis * ((ShellThickness / SinHalfAngle) * InnerScale);
 
 				if (PCGExSchedulingConstraintShapes::ConeContainsSphere(
-					InnerApex, Axis, InnerRange, CosHalfAngle, SinHalfAngle, SphereCenter, SphereRadius))
+					InnerApex, Axis, InnerRange, CosHalfAngle, SinHalfAngle, InteriorSphereCenter, SphereRadius))
 				{
 					bInside = false;
 				}
@@ -634,7 +660,7 @@ TOptional<double> UPCGExSchedulingConstraintCone::CalcPriority(const IPCGGenSour
 	}
 
 	// Radial closeness within Range; pair with a Direction Alignment constraint for angular priority.
-	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, bUse2DGrid);
+	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Frame.Position.GetValue(), InBounds, PCGExSchedulingShapes::ShouldFlattenSource(bUse2DGrid));
 	const double Distance = FMath::Sqrt(InBounds.ComputeSquaredDistanceToPoint(SourcePosition));
 
 	return ShapedPriority(1.0 - Distance / FMath::Max(Range, 1.0));

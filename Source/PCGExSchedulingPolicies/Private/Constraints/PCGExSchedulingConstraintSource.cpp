@@ -24,7 +24,7 @@ TOptional<double> UPCGExSchedulingConstraintDirectionAlignment::CalcPriority(con
 		return TOptional<double>();
 	}
 
-	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Position.GetValue(), InBounds, bUse2DGrid);
+	const FVector SourcePosition = PCGExSchedulingShapes::SanitizedSourcePosition(Position.GetValue(), InBounds, PCGExSchedulingShapes::ShouldFlattenSource(bUse2DGrid));
 	const FVector ToCell = InBounds.GetClosestPointTo(SourcePosition) - SourcePosition;
 
 	if (ToCell.IsNearlyZero())
